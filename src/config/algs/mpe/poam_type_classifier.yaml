@@ -1,0 +1,66 @@
+name: "poam_type_classifier"
+on_policy: True
+action_selector: "soft_policies"
+mask_before_softmax: True
+
+runner: "parallel"
+
+buffer_size: 256
+batch_size_run: 8
+batch_size: 256
+
+save_extra_stats: False
+
+hidden_dim: 64
+use_rnn: True
+
+obs_agent_id: True
+obs_last_action: True
+obs_state: False
+obs_individual_obs: False
+obs_team_composition: False
+
+agent_output_type: "pi_logits"
+learner: "classifier_learner"
+mac: "agent_owned_mac"
+agent: rnn_poam
+critic_type: "poam_critic"
+
+ed_pretrain_ts: 0 
+ed_pretrain_epochs: 10000
+ed_grad_norm_clip: 5
+ed_model_uncontrolled_only: False
+
+ed_epochs: 1
+n_ed_minibatch: 1
+n_ed_hidden_layers: 1
+ed_hidden_dim: 64
+embed_dim: 64
+ed_lr: 0.0005
+ed_bce_loss: False
+
+entropy_coef: 0.05
+standardise_rewards: True
+use_gae: True
+gae_lambda: 0.95
+q_nstep: 5
+
+epochs: 5
+n_minibatch: 1
+eps_clip: 0.1
+lr: 0.0005
+optim_alpha: 0.99
+optim_eps: .00001
+
+use_popart: False
+clip_value_loss: False
+use_huber_loss: False
+huber_delta: 10.0
+use_adv_std: True
+
+use_obs_norm: True
+use_orthogonal_init: True
+
+trainable_agents_mask_actor: True
+trainable_agents_mask_critic: False
+mask_type: "team"
