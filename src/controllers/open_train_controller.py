@@ -107,6 +107,11 @@ class OpenTrainMAC:
             self.active_uncontrolled_team_idx = self.uncontrolled_team_name_to_idx[active_uncontrolled_team]
         else:
             self.active_uncontrolled_team_idx = None
+        
+        # If using type-matched loader, select the matching trained policy
+        if getattr(self, '_use_type_matched_loader', False) and self.active_uncontrolled_team_idx is not None:
+            self.trained_agent.set_active_type(self.active_uncontrolled_team_idx)
+        
         self.uncontrolled_agent_pool = self.uncontrolled_agent_teams[active_uncontrolled_team]
         uncontrolled_agent_idxs = list(np.random.choice(len(self.uncontrolled_agent_pool), 
                                                      n_uncontrolled, 
@@ -148,10 +153,26 @@ class OpenTrainMAC:
         '''
         # initialize training agents
         agent_loader = self.args.trained_agents['agent_0']['agent_loader']
-        agent_path = self.args.trained_agents['agent_0']['agent_path']
-        self.trained_agent = agent_loader_REGISTRY[agent_loader](args=self.args,
-                                                                 scheme=scheme,
-                                                                 model_path=agent_path)
+        
+        # Check if using type-matched multi-policy loader
+        if agent_loader == "type_matched_train_loader":
+            policy_configs = self.args.trained_agents['agent_0'].get('policy_configs', [])
+            base_path = self.args.trained_agents['agent_0'].get('base_path', '')
+            self.trained_agent = agent_loader_REGISTRY[agent_loader](
+                args=self.args,
+                scheme=scheme,
+                policy_configs=policy_configs,
+                base_path=base_path,
+            )
+            self._use_type_matched_loader = True
+        else:
+            agent_path = self.args.trained_agents['agent_0']['agent_path']
+            self.trained_agent = agent_loader_REGISTRY[agent_loader](
+                args=self.args,
+                scheme=scheme,
+                model_path=agent_path
+            )
+            self._use_type_matched_loader = False
         
         # initialize+load uncontrolled agents
         base_uncntrl_path = self.args.base_uncntrl_path

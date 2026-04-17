@@ -3,6 +3,7 @@ from collections import defaultdict
 from typing import Dict, List, Sequence
 
 import torch as th
+from torch import nn
 
 from modules.agent_loaders import REGISTRY as agent_loader_REGISTRY
 from modules.classifiers import UncontrolledTransformerClassifier
@@ -59,7 +60,7 @@ class TypeConditionalAgentLoader:
         self.label_mapping: Dict[str, int] = {}
         self.acc_correct = 0
         self.acc_total = 0
-        self.experts: Dict[str, object] = {}
+        self.experts: Dict[str, nn.Module] = {}
         for type_cfg in teammate_cfgs:
             type_name = type_cfg["name"]
             self.type_names.append(type_name)

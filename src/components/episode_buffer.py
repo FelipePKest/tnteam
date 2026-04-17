@@ -17,7 +17,8 @@ class EpisodeBatch:
         self.batch_size = batch_size
         self.max_seq_length = max_seq_length
         self.preprocess = {} if preprocess is None else preprocess
-        self.device = device
+        # Ensure device is a torch.device object for compatibility with older PyTorch versions
+        self.device = th.device(device) if isinstance(device, str) else device
 
         if data is not None:
             self.data = data
@@ -62,22 +63,25 @@ class EpisodeBatch:
 
             if isinstance(vshape, int):
                 vshape = (vshape,)
+            # Ensure vshape is a flat tuple of ints (handle nested tuples)
+            vshape = tuple(int(v) for v in vshape)
 
             if group:
                 assert group in groups, "Group {} must have its number of members defined in _groups_".format(group)
-                shape = (groups[group], *vshape)
+                shape = (int(groups[group]),) + vshape
             else:
                 shape = vshape
 
             if episode_const:
-                self.data.episode_data[field_key] = th.zeros((batch_size, *shape), dtype=dtype, device=self.device)
+                self.data.episode_data[field_key] = th.zeros((int(batch_size),) + shape, dtype=dtype, device=self.device)
             else:
-                self.data.transition_data[field_key] = th.zeros((batch_size, max_seq_length, *shape), dtype=dtype, device=self.device)
+                self.data.transition_data[field_key] = th.zeros((int(batch_size), int(max_seq_length)) + shape, dtype=dtype, device=self.device)
 
     def extend(self, scheme, groups=None):
         self._setup_data(scheme, self.groups if groups is None else groups, self.batch_size, self.max_seq_length)
 
     def to(self, device):
+        device = th.device(device) if isinstance(device, str) else device
         for k, v in self.data.transition_data.items():
             self.data.transition_data[k] = v.to(device)
         for k, v in self.data.episode_data.items():
