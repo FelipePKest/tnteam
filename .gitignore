@@ -258,3 +258,6 @@ naht_results/*
 # ignore vscode folder
 .vscode
 *.DS_Store
+
+*.png
+*.th

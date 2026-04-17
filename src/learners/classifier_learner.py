@@ -85,6 +85,54 @@ class ClassifierLearner:
         state = th.load(f"{path}/classifier.th", map_location=self.device)
         self.model.load_state_dict(state)
 
+    def test(self, batch, t_env: int, log: bool = False):
+        """
+        Evaluate classifier on test episodes (fresh data, not used for training).
+        This provides a true measure of generalization accuracy.
+        
+        Args:
+            batch: Episode batch to evaluate on
+            t_env: Current environment timestep (for logging)
+            log: Whether to log the accuracy (default False, caller handles logging)
+            
+        Returns:
+            accuracy: Float accuracy on this batch, or None if no valid samples
+        """
+        self.model.eval()  # Set to eval mode (disables dropout)
+        
+        obs = batch["obs"][:, :-1].to(self.device)
+        filled = (batch["filled"][:, :-1].to(self.device) > 0).squeeze(-1).squeeze(-1)
+
+        if "trainable_agents" in batch.data.transition_data:
+            agent_mask = batch["trainable_agents"][:, :-1].to(self.device)
+            if agent_mask.dim() == 3:
+                agent_mask = agent_mask.unsqueeze(-1)
+            agent_mask = agent_mask > 0
+        else:
+            mask_shape = obs.shape[:-1] + (1,)
+            agent_mask = th.ones(mask_shape, dtype=th.bool, device=self.device)
+
+        labels = batch["uncontrolled_team_idx"].long().to(self.device).squeeze(-1)
+
+        prepared = self._prepare_training_windows(obs, filled, agent_mask, labels)
+        if prepared is None:
+            self.model.train()  # Restore train mode
+            return None
+
+        window_obs, window_time_mask, window_agent_mask, window_labels = prepared
+        
+        with th.no_grad():
+            logits = self.model(window_obs, window_time_mask, window_agent_mask)
+            preds = logits.argmax(dim=1)
+            accuracy = (preds == window_labels).float().mean().item()
+        
+        self.model.train()  # Restore train mode
+        
+        if log:
+            self.logger.log_stat("classifier_test_acc", accuracy, t_env)
+        
+        return accuracy
+
     def _prepare_training_windows(self, obs, filled, agent_mask, labels):
         """Construct fixed-horizon windows that mimic evaluation-time queries."""
         batch_size, max_t, n_agents, obs_dim = obs.shape

@@ -120,6 +120,10 @@ class OpenEvalMAC:
                     teammate_cfgs=teammate_cfgs,
                     base_uncntrl_path=base_uncntrl_path,
                 )
+                # Enable per-timestep tracking if requested
+                if classifier_cfg.get("track_per_timestep", False):
+                    if hasattr(agent, "set_track_per_timestep"):
+                        agent.set_track_per_timestep(True)
                 copies = agent_cfg.get("n_agents_to_populate", self.n_agents)
                 for _ in range(max(1, copies)):
                     self.trained_agent_pool.append(agent)
@@ -198,3 +202,18 @@ class OpenEvalMAC:
         if not accuracies:
             return None
         return sum(accuracies) / len(accuracies)
+
+    def get_timestep_predictions(self):
+        """Get per-timestep predictions from classifier agents."""
+        all_predictions = []
+        for agent in self.classifier_agents:
+            if hasattr(agent, "get_timestep_predictions"):
+                preds = agent.get_timestep_predictions()
+                all_predictions.extend(preds)
+        return all_predictions
+    
+    def set_track_per_timestep(self, enable: bool = True):
+        """Enable/disable per-timestep tracking on classifier agents."""
+        for agent in self.classifier_agents:
+            if hasattr(agent, "set_track_per_timestep"):
+                agent.set_track_per_timestep(enable)

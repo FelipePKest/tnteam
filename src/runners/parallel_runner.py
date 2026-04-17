@@ -258,8 +258,50 @@ class ParallelRunner:
             acc = self.mac.get_classifier_accuracy()
             if acc is not None:
                 self.logger.log_stat("test_classifier_accuracy", acc, self.t_env)
+            
+            # Save per-timestep predictions if tracking is enabled
+            if hasattr(self.mac, "get_timestep_predictions"):
+                timestep_preds = self.mac.get_timestep_predictions()
+                if timestep_preds:
+                    self._save_timestep_predictions(timestep_preds)
 
         return self.batch, mean_test_return
+    
+    def _save_timestep_predictions(self, predictions):
+        """Save per-timestep predictions to a JSON file."""
+        import json
+        import os
+        
+        if not hasattr(self.logger, "_run_obj") or self.logger._run_obj is None:
+            return
+        
+        try:
+            sacred_dir = self.logger._run_obj.observers[0].dir
+            pred_file = os.path.join(sacred_dir, "per_timestep_predictions.json")
+            
+            # Convert to serializable format: list of {timestep, prediction, ground_truth}
+            data = []
+            for entry in predictions:
+                if len(entry) == 3:
+                    t_ep, pred_idx, true_idx = entry
+                    data.append({
+                        "timestep": t_ep,
+                        "prediction": pred_idx,
+                        "ground_truth": true_idx,
+                    })
+            
+            # Append to existing file if exists
+            existing = []
+            if os.path.exists(pred_file):
+                with open(pred_file, "r") as f:
+                    existing = json.load(f)
+            
+            existing.extend(data)
+            
+            with open(pred_file, "w") as f:
+                json.dump(existing, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save timestep predictions: {e}")
 
     def _log(self, returns, stats, prefix):
         self.logger.log_stat(prefix + "return_mean", np.mean(returns), self.t_env)

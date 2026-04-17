@@ -213,8 +213,27 @@ def run_sequential(args, logger):
             last_time = time.time()
 
             last_test_T = runner.t_env
+            test_batches = []
             for _ in range(n_test_runs):
-                _, mean_test_return = runner.run(test_mode=True)
+                test_batch, mean_test_return = runner.run(test_mode=True)
+                test_batches.append(test_batch)
+
+            # Evaluate classifier on test episodes (if learner supports it)
+            if hasattr(learner, 'test') and test_batches:
+                # Test on each batch and average
+                test_accs = []
+                for tb in test_batches:
+                    max_ep_t = tb.max_t_filled()
+                    tb_truncated = tb[:, :max_ep_t]
+                    if tb_truncated.device != args.device:
+                        tb_truncated.to(args.device)
+                    acc = learner.test(tb_truncated, runner.t_env, log=False)
+                    if acc is not None:
+                        test_accs.append(acc)
+                if test_accs:
+                    mean_test_acc = sum(test_accs) / len(test_accs)
+                    logger.log_stat("classifier_test_acc", mean_test_acc, runner.t_env)
+                    logger.console_logger.info(f"Classifier test accuracy: {mean_test_acc:.4f}")
 
             # save best checkpoint
             assert mean_test_return is not None

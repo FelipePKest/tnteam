@@ -1,6 +1,8 @@
 from envs import REGISTRY as env_REGISTRY
 from functools import partial
 from components.episode_buffer import EpisodeBatch
+import json
+import os
 import numpy as np
 import torch as th
 
@@ -145,6 +147,17 @@ class EpisodeRunner:
         if test_mode and (len(self.test_returns) == self.args.test_nepisode):
             mean_test_return = np.mean(self.test_returns)
             self._log(cur_returns, cur_stats, log_prefix)
+            
+            # Log classifier accuracy and per-timestep predictions
+            if hasattr(self.mac, "get_classifier_accuracy"):
+                acc = self.mac.get_classifier_accuracy()
+                if acc is not None:
+                    self.logger.log_stat("test_classifier_accuracy", acc, self.t_env)
+            
+            if hasattr(self.mac, "get_timestep_predictions"):
+                timestep_preds = self.mac.get_timestep_predictions()
+                if timestep_preds:
+                    self._save_timestep_predictions(timestep_preds)
         elif self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
             self._log(cur_returns, cur_stats, log_prefix)
             if hasattr(self.mac.action_selector, "epsilon"):
@@ -177,6 +190,41 @@ class EpisodeRunner:
             if k != "n_episodes":
                 self.logger.log_stat(prefix + k + "_mean" , v/stats["n_episodes"], self.t_env)
         stats.clear()
+    
+    def _save_timestep_predictions(self, predictions):
+        """Save per-timestep predictions to a JSON file."""
+        import json
+        
+        if not hasattr(self.logger, "_run_obj") or self.logger._run_obj is None:
+            return
+        
+        try:
+            sacred_dir = self.logger._run_obj.observers[0].dir
+            pred_file = os.path.join(sacred_dir, "per_timestep_predictions.json")
+            
+            # Convert to serializable format
+            data = []
+            for entry in predictions:
+                if len(entry) == 3:
+                    t_ep, pred_idx, true_idx = entry
+                    data.append({
+                        "timestep": t_ep,
+                        "prediction": pred_idx,
+                        "ground_truth": true_idx,
+                    })
+            
+            # Append to existing file if exists
+            existing = []
+            if os.path.exists(pred_file):
+                with open(pred_file, "r") as f:
+                    existing = json.load(f)
+            
+            existing.extend(data)
+            
+            with open(pred_file, "w") as f:
+                json.dump(existing, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save timestep predictions: {e}")
 
     def compute_open_agent_mask(self, batch, agent_idx_list):
         '''compute mask corresponding to trained agents only'''
