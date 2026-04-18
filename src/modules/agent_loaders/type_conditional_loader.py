@@ -83,6 +83,8 @@ class TypeConditionalAgentLoader:
                 load_agent_idx=type_cfg.get("load_agent_idx", 0),
                 test_mode=type_cfg.get("test_mode", True),
             )
+            for param in expert.parameters():
+                param.requires_grad = False
             self.experts[type_name] = expert
 
         self.use_param_sharing = True
@@ -153,10 +155,7 @@ class TypeConditionalAgentLoader:
         return combined_logits, combined_actions, combined_hidden
 
     def parameters(self):
-        params = list(self.classifier.parameters())
-        for expert in self.experts.values():
-            params += list(expert.parameters())
-        return params
+        return self.classifier.parameters()
 
     def cuda(self):
         self.classifier.to(self.device)
@@ -165,6 +164,13 @@ class TypeConditionalAgentLoader:
 
     def init_hidden(self, batch_size):
         return None
+
+    @property
+    def action_selector(self):
+        first_expert = next(iter(self.experts.values()), None)
+        if first_expert is None:
+            raise RuntimeError("No expert policies loaded.")
+        return first_expert.action_selector
 
     # Helper methods --------------------------------------------------------
     def _normalize_bs(self, bs, batch_size):
@@ -248,6 +254,11 @@ class TypeConditionalAgentLoader:
 
     def get_classifier_module(self):
         return self.classifier
+
+    def set_encoder(self, encoder):
+        for expert in self.experts.values():
+            if hasattr(expert, "policy"):
+                expert.policy.encoder = encoder
 
     def _update_accuracy(self, batch, preds_list):
         if not self.label_mapping:

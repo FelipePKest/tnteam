@@ -79,34 +79,36 @@ n_uncontrolled: 2
 # IMPORTANT: policy_configs ORDER must match uncntrl_agents keys ORDER
 trained_agents:
   agent_0:
-    agent_loader: type_matched_train_loader
+    agent_loader: type_conditional_loader
     base_path: "naht_results/mpe-pp/open_train/poam-pqvmq_open/models"
-    policy_configs:
-      # Index 0: IPPO (matches agent_ippo)
+    classifier:
+      history_len: 32
+      d_model: 128
+      nhead: 4
+      num_layers: 2
+      ff: 256
+      dropout: 0.1
+    teammate_types:
       - name: ippo
         agent_loader: poam_eval_agent_loader
         agent_path: poam_baseline_seed=112358_04-02-03-00-00
         load_step: best
         test_mode: True
-      # Index 1: QMIX (matches agent_qmix)
       - name: qmix
         agent_loader: poam_eval_agent_loader
         agent_path: poam_baseline_seed=112358_04-01-10-29-18
         load_step: best
         test_mode: True
-      # Index 2: VDN (matches agent_vdn)
       - name: vdn
         agent_loader: poam_eval_agent_loader
         agent_path: poam_baseline_seed=112358_04-01-01-07-32
         load_step: best
         test_mode: True
-      # Index 3: MAPPO (matches agent_mappo)
       - name: mappo
         agent_loader: poam_eval_agent_loader
         agent_path: poam_baseline_seed=112358_03-31-11-48-33
         load_step: best
         test_mode: True
-      # Index 4: IQL (matches agent_iql)
       - name: iql
         agent_loader: poam_eval_agent_loader
         agent_path: poam_baseline_seed=112358_03-30-16-09-21

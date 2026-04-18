@@ -34,6 +34,8 @@ class ClassifierLearner:
             dim_feedforward=getattr(args, "classifier_ff", 256),
             dropout=getattr(args, "classifier_dropout", 0.1),
         ).to(self.device)
+        if hasattr(self.mac, "set_classifier"):
+            self.mac.set_classifier(self.model)
         self.optimizer = th.optim.Adam(
             self.model.parameters(),
             lr=getattr(args, "classifier_lr", 1e-4),

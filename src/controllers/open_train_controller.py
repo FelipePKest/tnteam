@@ -24,9 +24,19 @@ class OpenTrainMAC:
                        test_mode=False):
         '''Select joint action using the active team'''
         trained_agent_idxs = [agent_idx for agent_idx, _, team_name in self._active_team if team_name == "trained_agent_subteam"]
-        _, trained_agent_act, trained_agent_hidden = self.trained_agent.predict(ep_batch, agent_idx_list=trained_agent_idxs,
-                                                                                t_ep=t_ep, t_env=t_env, bs=bs,
-                                                                                test_mode=test_mode)
+        trained_outputs = [
+            self.trained_agent.predict(
+                ep_batch,
+                agent_idx=agent_idx,
+                t_ep=t_ep,
+                t_env=t_env,
+                bs=bs,
+                test_mode=test_mode,
+            )
+            for agent_idx in trained_agent_idxs
+        ]
+        trained_agent_act = th.cat([out[1] for out in trained_outputs], dim=2)
+        trained_agent_hidden = th.cat([out[2] for out in trained_outputs], dim=2)
         
         # compile outputs
         curr_agent_idx = 0
@@ -56,16 +66,32 @@ class OpenTrainMAC:
         '''This function is used by learners only. Thus, we only execute the forward pass 
         using the trained agent.'''
         trained_agent_idxs = list(range(self.n_agents))
-         # t_env used to select actions but we only need the logits here, so the value doesn't matter
-        agent_out, _, hidden = self.trained_agent.predict(ep_batch, agent_idx_list=trained_agent_idxs,
-                                                          t_ep=t, t_env=0,
-                                                          bs=slice(None),
-                                                          test_mode=test_mode)
+        # t_env is irrelevant here because only logits are consumed by the learner.
+        trained_outputs = [
+            self.trained_agent.predict(
+                ep_batch,
+                agent_idx=agent_idx,
+                t_ep=t,
+                t_env=0,
+                bs=slice(None),
+                test_mode=test_mode,
+            )
+            for agent_idx in trained_agent_idxs
+        ]
+        agent_out = th.cat([out[0] for out in trained_outputs], dim=2)
+        hidden = th.cat([out[2] for out in trained_outputs], dim=2)
         
         return agent_out, hidden
 
     def set_encoder(self, encoder): 
-        self.trained_agent.policy.encoder = encoder
+        if hasattr(self.trained_agent, "set_encoder"):
+            self.trained_agent.set_encoder(encoder)
+        else:
+            self.trained_agent.policy.encoder = encoder
+
+    def set_classifier(self, classifier):
+        if hasattr(self.trained_agent, "set_classifier_module"):
+            self.trained_agent.set_classifier_module(classifier)
         
     def init_hidden(self, batch_size):
         '''A dummy function for open evaluation only.'''
@@ -108,7 +134,9 @@ class OpenTrainMAC:
         else:
             self.active_uncontrolled_team_idx = None
         
-        # If using type-matched loader, select the matching trained policy
+        # Type-matched training hard-switches from the ground-truth label.
+        # Type-conditional training keeps the eval-time feedback loop and
+        # lets the classifier prediction choose the active expert instead.
         if getattr(self, '_use_type_matched_loader', False) and self.active_uncontrolled_team_idx is not None:
             self.trained_agent.set_active_type(self.active_uncontrolled_team_idx)
         
@@ -154,7 +182,8 @@ class OpenTrainMAC:
         # initialize training agents
         agent_loader = self.args.trained_agents['agent_0']['agent_loader']
         
-        # Check if using type-matched multi-policy loader
+        self.classifier_agents = []
+
         if agent_loader == "type_matched_train_loader":
             policy_configs = self.args.trained_agents['agent_0'].get('policy_configs', [])
             base_path = self.args.trained_agents['agent_0'].get('base_path', '')
@@ -165,6 +194,19 @@ class OpenTrainMAC:
                 base_path=base_path,
             )
             self._use_type_matched_loader = True
+        elif agent_loader == "type_conditional_loader":
+            classifier_cfg = self.args.trained_agents['agent_0'].get("classifier", {})
+            teammate_cfgs = self.args.trained_agents['agent_0'].get("teammate_types", [])
+            base_path = self.args.trained_agents['agent_0'].get("base_path", self.args.base_uncntrl_path)
+            self.trained_agent = agent_loader_REGISTRY[agent_loader](
+                args=self.args,
+                scheme=scheme,
+                classifier_cfg=classifier_cfg,
+                teammate_cfgs=teammate_cfgs,
+                base_uncntrl_path=base_path,
+            )
+            self._use_type_matched_loader = False
+            self.classifier_agents = [self.trained_agent]
         else:
             agent_path = self.args.trained_agents['agent_0']['agent_path']
             self.trained_agent = agent_loader_REGISTRY[agent_loader](
@@ -173,7 +215,7 @@ class OpenTrainMAC:
                 model_path=agent_path
             )
             self._use_type_matched_loader = False
-        
+
         # initialize+load uncontrolled agents
         base_uncntrl_path = self.args.base_uncntrl_path
         uncntrl_agents_dict = self.args.uncntrl_agents
@@ -228,3 +270,18 @@ class OpenTrainMAC:
             self.uncontrolled_team_name_to_idx = {
                 name: idx for idx, name in enumerate(self.uncontrolled_agent_teams.keys())
             }
+
+        for agent in getattr(self, "classifier_agents", []):
+            if hasattr(agent, "set_label_mapping") and self.uncontrolled_team_name_to_idx is not None:
+                agent.set_label_mapping(self.uncontrolled_team_name_to_idx)
+
+    def get_classifier_accuracy(self):
+        accuracies = []
+        for agent in getattr(self, "classifier_agents", []):
+            if hasattr(agent, "pop_accuracy"):
+                acc = agent.pop_accuracy()
+                if acc is not None:
+                    accuracies.append(acc)
+        if not accuracies:
+            return None
+        return sum(accuracies) / len(accuracies)
