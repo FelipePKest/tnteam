@@ -1,0 +1,77 @@
+# --- POAM training with MAPPO uncontrolled agents only ---
+
+# --- pymarl options ---
+runner: "episode"
+mac: "open_train_mac"
+env: "gymma"
+non_overridable: ['mac']
+env_args: {}
+batch_size_run: 8
+test_nepisode: 128
+test_interval: 50000
+test_greedy: True
+
+log_interval: 50000
+runner_log_interval: 50000
+learner_log_interval: 50000
+t_max: 20050000
+use_cuda: True
+buffer_cpu_only: True
+log_discounted_return: False
+
+# --- Classifier defaults ---
+classifier_d_model: 128
+classifier_nhead: 4
+classifier_layers: 2
+classifier_ff: 256
+classifier_dropout: 0.1
+classifier_lr: 0.0001
+classifier_weight_decay: 0.0
+
+# ---  Logging/eval options ---
+use_tensorboard: True
+save_model: True
+save_model_interval: 1000000
+checkpoint_path: ""
+render: False
+
+# --- Default learning hyperparameters ---
+gamma: 0.99
+batch_size: 32
+buffer_size: 32
+lr: 0.0005
+optim_alpha: 0.99
+optim_eps: 0.00001
+grad_norm_clip: 10
+add_value_last_step: True
+
+# --- Default agent parameters ---
+agent: "rnn"
+use_rnn: True
+hidden_dim: 64
+obs_last_action: True
+
+# --- Open train Parameters ---
+test_verbose: False
+save_replay: False
+eval_mode: null
+local_results_path: mpe-pp/open_train/poam-vs-mappo
+
+# --- agents to load ---
+n_uncontrolled: null
+trained_agents:
+  agent_0:
+    agent_loader: rnn_train_agent_loader
+    agent_path: ""
+uncntrl_agents:
+  agent_mappo:
+    agent_loader: rnn_eval_agent_loader
+    agent_path: mpe-pp/mappo/models/mappo_baseline_seed=112358_04-24-12-04-31
+    load_step: best
+    n_agents_to_populate: 3
+    test_mode: True
+
+# --- Experiment running params ---
+repeat_id: 1
+label: baseline
+hypergroup: null
