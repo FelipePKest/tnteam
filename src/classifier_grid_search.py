@@ -94,18 +94,21 @@ def command_for_config(config_path, seed, args):
         f"--env-config={args.env_config}",
         f"--config={config_name_from_path(config_path)}",
         f"--alg-config={args.alg_config}",
-        "with",
     ]
+    overrides = []
     if args.cuda is not None:
-        cmd.append(f"use_cuda={str(args.cuda)}")
+        overrides.append(f"use_cuda={str(args.cuda)}")
     if args.t_max is not None:
-        cmd.append(f"t_max={args.t_max}")
+        overrides.append(f"t_max={args.t_max}")
     if args.save_model_interval is not None:
-        cmd.append(f"save_model_interval={args.save_model_interval}")
+        overrides.append(f"save_model_interval={args.save_model_interval}")
     if args.test_interval is not None:
-        cmd.append(f"test_interval={args.test_interval}")
+        overrides.append(f"test_interval={args.test_interval}")
     if args.extra_override:
-        cmd.extend(args.extra_override)
+        overrides.extend(args.extra_override)
+    if overrides:
+        cmd.append("with")
+        cmd.extend(overrides)
     if args.conda_env:
         return ["conda", "run", "-n", args.conda_env, *cmd]
     return cmd
@@ -118,7 +121,7 @@ def main():
     parser.add_argument("--base-results-path", default="mpe-pp/open_train/classifier_grid")
     parser.add_argument("--env-config", default="gymma")
     parser.add_argument("--alg-config", default="mpe/poam_type_classifier")
-    parser.add_argument("--conda-env", default="epy")
+    parser.add_argument("--conda-env", default=None)
     parser.add_argument("--seeds", default="112358", help="Comma-separated seeds.")
     parser.add_argument("--history-lens", default=None, help="Comma-separated classifier_history_len values.")
     parser.add_argument("--d-models", default=None, help="Comma-separated classifier_d_model values.")
