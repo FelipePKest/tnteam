@@ -15,10 +15,12 @@ def parse_args():
     parser.add_argument("--expt_label", type=str, help="e.g. qmix-seed=1_qmix-seed=1_n-1")
     parser.add_argument("--dest_config_path", type=str, help="e.g. src/config/temp/default.yaml")
     parser.add_argument("--eval_seed", type=int, default=394820)
+    parser.add_argument("--alg_config", type=str, default="open_dummy")
+    parser.add_argument("--cleanup", type=str2bool, default=True)
     parser.add_argument("--debug", type=str2bool, default=False)
     return parser.parse_args()
         
-def perform_eval(env_nickname, dest_config_path, eval_seed, debug):
+def perform_eval(env_nickname, dest_config_path, eval_seed, debug, alg_config="open_dummy", cleanup=True):
     ''' implement the logic to evaluate algorithm i against algorithm j
     '''
     env_config_name = ENV_CONFIGS[env_nickname]["env_config"]
@@ -28,7 +30,7 @@ def perform_eval(env_nickname, dest_config_path, eval_seed, debug):
             f"--seed={eval_seed}",
             f"--env-config={env_config_name}", 
             f"--config={dest_config_name}",
-            f"--alg-config=open_dummy",
+            f"--alg-config={alg_config}",
             "with",
             *[f"env_args.{k}={str(v)}" for k, v in env_args.items()],
             ]
@@ -41,7 +43,8 @@ def perform_eval(env_nickname, dest_config_path, eval_seed, debug):
         print("RUN_EVAL.PY: exec=", exec)
         print("RUN_EVAL.PY: dest_config_path=", dest_config_path)
         subprocess.call(exec, shell=True) # this will wait for the result
-    cleanup_temp_config(dest_config_path)
+    if cleanup:
+        cleanup_temp_config(dest_config_path)
 
 
 if __name__ == "__main__":
@@ -53,6 +56,8 @@ if __name__ == "__main__":
     log_folder = args.log_folder
     expt_label = args.expt_label
     debug = args.debug
+    alg_config = args.alg_config
+    cleanup = args.cleanup
     
     # get the config path for the algorithm
     dest_config_path = args.dest_config_path
@@ -61,6 +66,7 @@ if __name__ == "__main__":
     perform_eval(env_nickname=env_nickname, 
                  dest_config_path=dest_config_path, 
                  eval_seed=eval_seed, 
-                 debug=debug
+                 debug=debug,
+                 alg_config=alg_config,
+                 cleanup=cleanup,
                  )
-

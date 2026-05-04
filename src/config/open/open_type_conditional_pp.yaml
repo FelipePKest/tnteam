@@ -26,6 +26,24 @@ use_tensorboard: False
 test_verbose: False
 save_replay: False
 
+# Runtime defaults needed when launching this config directly via src/main.py.
+hidden_dim: 64
+agent: "rnn"
+use_rnn: True
+obs_agent_id: True
+obs_last_action: True
+gamma: 0.99
+batch_size: 32
+buffer_size: 32
+lr: 0.0005
+optim_alpha: 0.99
+optim_eps: 0.00001
+grad_norm_clip: 10
+add_value_last_step: True
+repeat_id: 1
+ed_hidden_dim: 64
+embed_dim: 64
+
 # Classifier hyperparameters (overridable via CLI)
 classifier_d_model: 128
 classifier_nhead: 4
@@ -42,7 +60,7 @@ trained_agents:
     agent_loader: type_conditional_loader
     n_agents_to_populate: 3
     classifier:
-      checkpoint: "naht_results/mpe-pp/open_train/poam-pqvmq_open/models/poam_baseline_seed=112358_04-02-14-37-26/20000800/classifier.th"
+      checkpoint: "/Users/felipekestelman/Git/tnteam/classifier.th"
       history_len: 32
       d_model: 128
       nhead: 4

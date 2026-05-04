@@ -24,19 +24,14 @@ class OpenTrainMAC:
                        test_mode=False):
         '''Select joint action using the active team'''
         trained_agent_idxs = [agent_idx for agent_idx, _, team_name in self._active_team if team_name == "trained_agent_subteam"]
-        trained_outputs = [
-            self.trained_agent.predict(
-                ep_batch,
-                agent_idx=agent_idx,
-                t_ep=t_ep,
-                t_env=t_env,
-                bs=bs,
-                test_mode=test_mode,
-            )
-            for agent_idx in trained_agent_idxs
-        ]
-        trained_agent_act = th.cat([out[1] for out in trained_outputs], dim=2)
-        trained_agent_hidden = th.cat([out[2] for out in trained_outputs], dim=2)
+        _, trained_agent_act, trained_agent_hidden = self._predict_trained_agents(
+            ep_batch,
+            trained_agent_idxs,
+            t_ep=t_ep,
+            t_env=t_env,
+            bs=bs,
+            test_mode=test_mode,
+        )
         
         # compile outputs
         curr_agent_idx = 0
@@ -67,21 +62,43 @@ class OpenTrainMAC:
         using the trained agent.'''
         trained_agent_idxs = list(range(self.n_agents))
         # t_env is irrelevant here because only logits are consumed by the learner.
+        agent_out, _, hidden = self._predict_trained_agents(
+            ep_batch,
+            trained_agent_idxs,
+            t_ep=t,
+            t_env=0,
+            bs=slice(None),
+            test_mode=test_mode,
+        )
+        
+        return agent_out, hidden
+
+    def _predict_trained_agents(self, ep_batch, trained_agent_idxs, t_ep, t_env, bs, test_mode):
+        if not getattr(self, "_use_type_conditional_loader", False):
+            return self.trained_agent.predict(
+                ep_batch,
+                agent_idx_list=trained_agent_idxs,
+                t_ep=t_ep,
+                t_env=t_env,
+                bs=bs,
+                test_mode=test_mode,
+            )
+
         trained_outputs = [
             self.trained_agent.predict(
                 ep_batch,
                 agent_idx=agent_idx,
-                t_ep=t,
-                t_env=0,
-                bs=slice(None),
+                t_ep=t_ep,
+                t_env=t_env,
+                bs=bs,
                 test_mode=test_mode,
             )
             for agent_idx in trained_agent_idxs
         ]
         agent_out = th.cat([out[0] for out in trained_outputs], dim=2)
+        actions = th.cat([out[1] for out in trained_outputs], dim=2)
         hidden = th.cat([out[2] for out in trained_outputs], dim=2)
-        
-        return agent_out, hidden
+        return agent_out, actions, hidden
 
     def set_encoder(self, encoder): 
         if hasattr(self.trained_agent, "set_encoder"):
@@ -194,6 +211,7 @@ class OpenTrainMAC:
                 base_path=base_path,
             )
             self._use_type_matched_loader = True
+            self._use_type_conditional_loader = False
         elif agent_loader == "type_conditional_loader":
             classifier_cfg = self.args.trained_agents['agent_0'].get("classifier", {})
             teammate_cfgs = self.args.trained_agents['agent_0'].get("teammate_types", [])
@@ -206,6 +224,7 @@ class OpenTrainMAC:
                 base_uncntrl_path=base_path,
             )
             self._use_type_matched_loader = False
+            self._use_type_conditional_loader = True
             self.classifier_agents = [self.trained_agent]
         else:
             agent_path = self.args.trained_agents['agent_0']['agent_path']
@@ -215,6 +234,7 @@ class OpenTrainMAC:
                 model_path=agent_path
             )
             self._use_type_matched_loader = False
+            self._use_type_conditional_loader = False
 
         # initialize+load uncontrolled agents
         base_uncntrl_path = self.args.base_uncntrl_path

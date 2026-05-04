@@ -282,7 +282,9 @@ class ParallelRunner:
             # Convert to serializable format: list of {timestep, prediction, ground_truth}
             data = []
             for entry in predictions:
-                if len(entry) == 3:
+                if isinstance(entry, dict):
+                    data.append(entry)
+                elif len(entry) == 3:
                     t_ep, pred_idx, true_idx = entry
                     data.append({
                         "timestep": t_ep,

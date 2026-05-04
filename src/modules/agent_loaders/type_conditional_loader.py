@@ -90,7 +90,7 @@ class TypeConditionalAgentLoader:
         self.use_param_sharing = True
         
         # Per-timestep tracking for visualization
-        self.timestep_predictions = []  # List of (t_ep, pred_idx, true_idx) tuples
+        self.timestep_predictions = []
         self.track_per_timestep = False  # Enable via set_track_per_timestep()
 
     def set_track_per_timestep(self, enable: bool = True):
@@ -205,22 +205,25 @@ class TypeConditionalAgentLoader:
                     if labels.ndim > 1:
                         labels = labels[:, 0]
                     labels = labels.long()
+                    reverse_label_mapping = {idx: name for name, idx in self.label_mapping.items()}
                     for pos, env in enumerate(env_indices):
-                        # Pred index: classifier's prediction (0 to num_types-1)
                         pred_idx = preds_list[pos]
                         pred_name = self.type_names[pred_idx]
-                        # Convert ground truth to match classifier indexing via label_mapping
                         env_true_idx = labels[pos].item() if pos < len(labels) else -1
-                        # Find which classifier type index corresponds to this ground truth
-                        true_idx = -1
-                        if self.label_mapping:
-                            for type_name, mapped_idx in self.label_mapping.items():
-                                if mapped_idx == env_true_idx:
-                                    # Found the name, now get classifier index
-                                    if type_name in self.type_name_to_idx:
-                                        true_idx = self.type_name_to_idx[type_name]
-                                    break
-                        self.timestep_predictions.append((t_ep, pred_idx, true_idx))
+                        true_name = reverse_label_mapping.get(env_true_idx)
+                        true_idx = self.type_name_to_idx.get(true_name, -1)
+                        is_correct = None if true_idx < 0 else pred_idx == true_idx
+                        self.timestep_predictions.append(
+                            {
+                                "timestep": int(t_ep),
+                                "env_idx": int(env),
+                                "prediction_idx": int(pred_idx),
+                                "prediction_type": pred_name,
+                                "ground_truth_idx": int(true_idx),
+                                "ground_truth_type": true_name,
+                                "is_correct": is_correct,
+                            }
+                        )
             except (KeyError, AttributeError):
                 # uncontrolled_team_idx not available in this batch
                 pass

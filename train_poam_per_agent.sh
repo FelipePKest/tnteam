@@ -28,9 +28,11 @@ echo "Training POAM agent against each agent type separately"
 echo "=============================================="
 
 for AGENT_TYPE in "${AGENT_TYPES[@]}"; do
+    AGENT_TYPE_UPPER=$(printf "%s" "$AGENT_TYPE" | tr '[:lower:]' '[:upper:]')
+
     echo ""
     echo "=============================================="
-    echo "Training POAM against ${AGENT_TYPE^^} agents"
+    echo "Training POAM against ${AGENT_TYPE_UPPER} agents"
     echo "=============================================="
     
     # Use the separate config files for each agent type
@@ -38,13 +40,17 @@ for AGENT_TYPE in "${AGENT_TYPES[@]}"; do
         --env-config=mpe \
         --config=open/uncntrl_agents/pp_${AGENT_TYPE} \
         --alg-config=mpe/poam \
-        --seed=${SEED}
+        --seed=${SEED} \
+        with \
+        env_args.key=mpe:PredatorPrey-v0 \
+        env_args.pretrained_wrapper=PretrainedTag \
+        env_args.time_limit=100
     
     # Check if training succeeded
     if [ $? -eq 0 ]; then
-        echo "Training against ${AGENT_TYPE^^} completed successfully!"
+        echo "Training against ${AGENT_TYPE_UPPER} completed successfully!"
     else
-        echo "Training against ${AGENT_TYPE^^} failed!"
+        echo "Training against ${AGENT_TYPE_UPPER} failed!"
         exit 1
     fi
 done

@@ -205,12 +205,14 @@ class EpisodeRunner:
             # Convert to serializable format
             data = []
             for entry in predictions:
-                if len(entry) == 3:
+                if isinstance(entry, dict):
+                    data.append(entry)
+                elif len(entry) == 3:
                     t_ep, pred_idx, true_idx = entry
                     data.append({
                         "timestep": t_ep,
-                        "prediction": pred_idx,
-                        "ground_truth": true_idx,
+                        "prediction_idx": pred_idx,
+                        "ground_truth_idx": true_idx,
                     })
             
             # Append to existing file if exists
