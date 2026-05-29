@@ -716,13 +716,13 @@ if __name__ == "__main__":
     '''
     # set seed 
     random.seed(0)
-    EVAL_SEED = 394820
+    EVAL_SEED = 394822
 
     DEBUG = False # toggle this to debug the script without running the evaluation
     USE_CONDOR = False # toggle this to run the evaluation on condor
-    RUN_TYPE_CONDITIONAL = True
+    RUN_TYPE_CONDITIONAL = False
     RUN_POAM_EXPERT_VS_TYPES = False
-    RUN_TARGET_SET = False
+    RUN_TARGET_SET = True
     base_path = USER_INFO['base_results_path']
     
     # expt_dir = "5v6"
@@ -762,14 +762,16 @@ if __name__ == "__main__":
 
 
     if RUN_TYPE_CONDITIONAL:
+        
         classifier_cfg = {
-            "history_len": 32,
-            "d_model": 128,
+            "d_model": 64,
             "nhead": 4,
-            "num_layers": 2,
-            "ff": 256,
+            "num_layers": 6,
+            "ff": 64,
             "dropout": 0.1,
+            "history_len": 16,
         }
+
         poam_expert_cfgs = [
             {
                 "name": "ippo",
@@ -867,7 +869,7 @@ if __name__ == "__main__":
                 expt_path=os.path.join(base_path, expt_dir),
                 env_nickname=env_nickname,
                 num_agents=num_agents,
-                classifier_checkpoint="/Users/felipekestelman/Git/tnteam/classifier.th",
+                classifier_checkpoint="naht_results/mpe-pp/open_train/classifier_grid/classifier.th",
                 classifier_cfg=classifier_cfg,
                 expert_cfgs=poam_expert_cfgs,
                 uncntrl_agents_config=type_conditional_uncntrl_agents,
@@ -896,7 +898,8 @@ if __name__ == "__main__":
                         target_algs=["vdn", "qmix", "iql", "mappo", "ippo"],
                         # target_algs=["vdn", "ippo"], # for ood alt train/test split
                         # algs_to_eval_seeds=["112358", "1285842", "78590", "38410", "93718"],
-                        algs_to_eval_seeds=["112358"], # for in-distribution eval
+                        # algs_to_eval_seeds=["112358"], # for in-distribution eval
+                        algs_to_eval_seeds=["112358_02-19-00-22-08"],
                         # target_algs_seeds=["1285842", "78590", "38410", "93718"],# not eval on 112358 because that's the training set
                         target_algs_seeds=["112358"], # for in-distribution eval
                         # target_algs_seeds=["112358", "1285842", "78590", "38410", "93718"], # for alt train/test split

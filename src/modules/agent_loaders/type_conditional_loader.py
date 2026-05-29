@@ -6,7 +6,7 @@ import torch as th
 from torch import nn
 
 from modules.agent_loaders import REGISTRY as agent_loader_REGISTRY
-from modules.classifiers import UncontrolledTransformerClassifier
+from modules.classifiers import build_classifier
 
 
 class TypeConditionalAgentLoader:
@@ -38,7 +38,8 @@ class TypeConditionalAgentLoader:
             for dim in obs_shape:
                 obs_dim *= dim
 
-        self.classifier = UncontrolledTransformerClassifier(
+        self.classifier = build_classifier(
+            architecture=classifier_cfg.get("architecture", classifier_cfg.get("type", "transformer")),
             obs_dim=obs_dim,
             n_agents=args.n_agents,
             episode_limit=args.episode_limit,
@@ -46,8 +47,10 @@ class TypeConditionalAgentLoader:
             d_model=classifier_cfg.get("d_model", 128),
             nhead=classifier_cfg.get("nhead", 4),
             num_layers=classifier_cfg.get("num_layers", 2),
-            dim_feedforward=classifier_cfg.get("ff", 256),
+            ff=classifier_cfg.get("ff", 256),
             dropout=classifier_cfg.get("dropout", 0.1),
+            hidden_dim=classifier_cfg.get("hidden_dim", classifier_cfg.get("d_model", 128)),
+            bidirectional=classifier_cfg.get("bidirectional", False),
         ).to(self.device)
 
         ckpt_path = classifier_cfg.get("checkpoint", "")
@@ -186,10 +189,12 @@ class TypeConditionalAgentLoader:
         obs_tensor, time_mask, agent_mask = self._build_classifier_tensors(
             batch, t_ep
         )
+        was_training = self.classifier.training
         self.classifier.eval()
         with th.no_grad():
             logits = self.classifier(obs_tensor, time_mask, agent_mask)
             preds = logits.argmax(dim=-1)
+        self.classifier.train(was_training)
         mapping = {}
         preds_list = preds.tolist()
         for pos, env in enumerate(env_indices):
@@ -231,16 +236,50 @@ class TypeConditionalAgentLoader:
         return mapping
 
     def _build_classifier_tensors(self, batch, t_ep):
-        max_t = batch.max_seq_length if t_ep is None else t_ep + 1
-        start = max(0, max_t - self.history_len)
-        ts = slice(start, max_t)
-        obs = batch["obs"][:, ts].to(self.device)
-        time_mask = batch["filled"][:, ts].to(self.device).bool()
+        obs_all = batch["obs"].to(self.device)
+        batch_size, max_seq_length, n_agents, obs_dim = obs_all.shape
+        end = max_seq_length if t_ep is None else min(t_ep + 1, max_seq_length)
+        history = min(self.history_len, max_seq_length)
+        start = max(0, end - history)
+        length = max(0, end - start)
+
+        obs = th.zeros(
+            (batch_size, history, n_agents, obs_dim),
+            device=self.device,
+            dtype=obs_all.dtype,
+        )
+        time_mask = th.zeros(
+            (batch_size, history, 1),
+            device=self.device,
+            dtype=th.bool,
+        )
+        agent_mask = th.zeros(
+            (batch_size, history, n_agents, 1),
+            device=self.device,
+            dtype=th.bool,
+        )
+
+        if length == 0:
+            return obs, time_mask, agent_mask
+
+        obs[:, -length:].copy_(obs_all[:, start:end])
+
+        filled = batch["filled"][:, start:end].to(self.device).bool()
+        while filled.dim() > 2 and filled.shape[-1] == 1:
+            filled = filled.squeeze(-1)
+        time_mask[:, -length:].copy_(filled.unsqueeze(-1))
+
         if "trainable_agents" in batch.data.transition_data:
-            agent_mask = batch["trainable_agents"][:, ts].to(self.device).bool()
+            source_agent_mask = batch["trainable_agents"][:, start:end].to(self.device).bool()
+            if source_agent_mask.dim() == 3:
+                source_agent_mask = source_agent_mask.unsqueeze(-1)
         else:
-            mask_shape = obs.shape[:-1] + (1,)
-            agent_mask = th.ones(mask_shape, dtype=th.bool, device=self.device)
+            source_agent_mask = th.ones(
+                (batch_size, length, n_agents, 1),
+                dtype=th.bool,
+                device=self.device,
+            )
+        agent_mask[:, -length:].copy_(source_agent_mask)
         return obs, time_mask, agent_mask
 
     def set_label_mapping(self, name_to_idx: Dict[str, int]):

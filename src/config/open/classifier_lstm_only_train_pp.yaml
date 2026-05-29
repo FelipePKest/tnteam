@@ -1,15 +1,29 @@
-# Classifier-only training configuration
-# Uses fixed pre-trained POAM policies and only trains the classifier weights
-# This ensures training distribution matches evaluation distribution
+# LSTM classifier-only training configuration for MPE Predator-Prey.
+# Mirrors classifier_only_train_pp.yaml but swaps the classifier architecture.
 
-name: "poam_classifier_only"
-local_results_path: mpe-pp/open_train/poam_classifier_only
+name: "poam_lstm_classifier_only"
+local_results_path: mpe-pp/open_train/poam_lstm_classifier_only
 
 # --- pymarl options ---
 runner: "parallel"
 mac: "open_train_mac"
 env: "gymma"
-non_overridable: ['mac', 'n_uncontrolled']
+non_overridable:
+  - name
+  - local_results_path
+  - mac
+  - learner
+  - trained_agents
+  - uncntrl_agents
+  - agent_loader
+  - agent_path
+  - base_path
+  - classifier
+  - n_uncontrolled
+  - teammate_types
+  - obs_state
+  - obs_individual_obs
+  - obs_team_composition
 env_args:
   key: "mpe:PredatorPrey-v0"
   pretrained_wrapper: "PretrainedTag"
@@ -29,15 +43,20 @@ buffer_cpu_only: True
 log_discounted_return: False
 
 # --- Classifier hyperparameters ---
-classifier_d_model: 128
-classifier_nhead: 4
+classifier_architecture: "lstm"
+classifier_hidden_dim: 128
 classifier_layers: 2
-classifier_ff: 256
 classifier_dropout: 0.1
+classifier_bidirectional: False
 classifier_lr: 0.0001
 classifier_weight_decay: 0.0
 classifier_history_len: 32
 classifier_minibatch_size: 1024
+
+# Kept for compatibility with scripts/configs that expect transformer-style names.
+classifier_d_model: 128
+classifier_nhead: 4
+classifier_ff: 256
 
 # --- Logging/eval options ---
 use_tensorboard: True
@@ -77,18 +96,18 @@ eval_mode: null
 n_uncontrolled: null # sample uniformly per open-train episode, matching policy training
 
 # --- Pre-trained POAM policies (one per uncontrolled type) ---
-# IMPORTANT: policy_configs ORDER must match uncntrl_agents keys ORDER
+# IMPORTANT: teammate_types ORDER must match uncntrl_agents keys ORDER
 trained_agents:
   agent_0:
     agent_loader: type_conditional_loader
     base_path: "naht_results/mpe-pp/open_train/poam-pqvmq_open/models"
     classifier:
+      architecture: "lstm"
       history_len: 32
-      d_model: 128
-      nhead: 4
+      hidden_dim: 128
       num_layers: 2
-      ff: 256
       dropout: 0.1
+      bidirectional: False
     teammate_types:
       - name: ippo
         agent_loader: poam_eval_agent_loader
@@ -117,7 +136,7 @@ trained_agents:
         test_mode: True
 
 # --- Uncontrolled agents to train against ---
-# ORDER of keys matters - must match policy_configs order
+# ORDER of keys matters - must match teammate_types order
 uncntrl_agents:
   agent_ippo:
     agent_loader: rnn_eval_agent_loader
@@ -152,5 +171,5 @@ uncntrl_agents:
 
 # --- Experiment running params ---
 repeat_id: 1
-label: classifier_only
+label: classifier_lstm_only
 hypergroup: null
