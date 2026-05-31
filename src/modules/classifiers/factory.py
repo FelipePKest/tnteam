@@ -35,6 +35,7 @@ def build_classifier(
             num_layers=kwargs.get("num_layers", kwargs.get("layers", 2)),
             dropout=kwargs.get("dropout", 0.1),
             bidirectional=kwargs.get("bidirectional", False),
+            count_embed_dim=kwargs.get("count_embed_dim", 8),
         )
     raise ValueError(f"Unknown classifier architecture: {architecture}")
 
@@ -49,4 +50,5 @@ def classifier_kwargs_from_args(args) -> Dict[str, Any]:
         "dropout": getattr(args, "classifier_dropout", 0.1),
         "hidden_dim": getattr(args, "classifier_hidden_dim", getattr(args, "classifier_d_model", 128)),
         "bidirectional": getattr(args, "classifier_bidirectional", False),
+        "count_embed_dim": getattr(args, "classifier_count_embed_dim", 8),
     }

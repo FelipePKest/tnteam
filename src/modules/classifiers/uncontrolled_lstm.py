@@ -15,10 +15,12 @@ class UncontrolledLSTMClassifier(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.1,
         bidirectional: bool = False,
+        count_embed_dim: int = 8,
     ) -> None:
         super().__init__()
         self.n_agents = n_agents
-        self.obs_proj = nn.Linear(obs_dim + 1, hidden_dim)
+        self.count_embed = nn.Embedding(n_agents + 1, count_embed_dim)
+        self.obs_proj = nn.Linear(obs_dim + 2 + count_embed_dim, hidden_dim)
         self.lstm = nn.LSTM(
             input_size=hidden_dim * n_agents,
             hidden_size=hidden_dim,
@@ -28,11 +30,10 @@ class UncontrolledLSTMClassifier(nn.Module):
             batch_first=True,
         )
         output_dim = hidden_dim * (2 if bidirectional else 1)
-        count_features = 2
         self.cls_head = nn.Sequential(
-            nn.LayerNorm(output_dim + count_features),
+            nn.LayerNorm(output_dim + count_embed_dim),
             nn.Dropout(dropout),
-            nn.Linear(output_dim + count_features, num_uncontrolled_types),
+            nn.Linear(output_dim + count_embed_dim, num_uncontrolled_types),
         )
 
     def forward(
@@ -54,8 +55,19 @@ class UncontrolledLSTMClassifier(nn.Module):
             raise ValueError(f"Expected {self.n_agents} agents, got {nagents}")
 
         valid_agent_mask = time_mask.unsqueeze(2) & agent_mask
-        obs_with_mask = torch.cat([obs, valid_agent_mask.to(dtype=obs.dtype)], dim=-1)
-        x = self.obs_proj(obs_with_mask)
+        controlled_count = valid_agent_mask.squeeze(-1).sum(dim=2).long().clamp(0, self.n_agents)
+        count_context = self.count_embed(controlled_count).unsqueeze(2).expand(-1, -1, nagents, -1)
+        valid_time = time_mask.unsqueeze(2).expand(-1, -1, nagents, -1).to(dtype=obs.dtype)
+        obs_features = torch.cat(
+            [
+                obs,
+                agent_mask.to(dtype=obs.dtype),
+                valid_time,
+                count_context,
+            ],
+            dim=-1,
+        )
+        x = self.obs_proj(obs_features)
         x = (x * valid_agent_mask.to(dtype=x.dtype)).reshape(bsz, timesteps, nagents * x.shape[-1])
 
         encoded, _ = self.lstm(x)
@@ -67,8 +79,6 @@ class UncontrolledLSTMClassifier(nn.Module):
         )
         pooled = encoded[torch.arange(encoded.shape[0], device=encoded.device), last_indices]
 
-        controlled_agents = valid_agent_mask.any(dim=1).squeeze(-1).sum(dim=1).to(dtype=pooled.dtype)
-        controlled_frac = controlled_agents / float(self.n_agents)
-        uncontrolled_frac = 1.0 - controlled_frac
-        count_context = torch.stack([controlled_frac, uncontrolled_frac], dim=-1)
-        return self.cls_head(torch.cat([pooled, count_context], dim=-1))
+        final_count = controlled_count[torch.arange(encoded.shape[0], device=encoded.device), last_indices]
+        final_count_context = self.count_embed(final_count)
+        return self.cls_head(torch.cat([pooled, final_count_context], dim=-1))
