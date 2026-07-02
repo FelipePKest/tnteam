@@ -66,7 +66,7 @@ trained_agents:
 uncntrl_agents:
   agent_ippo:
     agent_loader: rnn_eval_agent_loader
-    agent_path: mpe-pp/ippo/models/ippo_baseline_seed=112358_07-10-14-39-17
+    agent_path: mpe-pp/ippo/models/ippo_baseline_seed=78590_04-25-14-08-14
     load_step: best
     n_agents_to_populate: 3
     test_mode: True

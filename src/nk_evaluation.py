@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import random
+import re
 import shutil
 import yaml 
 
@@ -239,7 +240,8 @@ def write_type_conditional_temp_config(env_nickname: str,
                                        uncntrl_agent_name: str,
                                        uncntrl_agent_cfg: dict,
                                        k: int,
-                                       num_agents: int):
+                                       num_agents: int,
+                                       training_seed=None):
     """Write a temp config for classifier-conditioned POAM expert evaluation."""
     with open(src_config_path) as f:
         conf = yaml.load(f, Loader=yaml.FullLoader)
@@ -269,7 +271,8 @@ def write_type_conditional_temp_config(env_nickname: str,
     clean_name = uncntrl_agent_name
     if clean_name.startswith("agent_"):
         clean_name = clean_name[len("agent_"):]
-    conf['label'] = f"type_conditional_{clean_name}_n-{k}"
+    seed_suffix = f"_seed={training_seed}" if training_seed is not None else ""
+    conf['label'] = f"type_conditional_{clean_name}{seed_suffix}_n-{k}"
 
     os.makedirs(os.path.dirname(dest_config_path), exist_ok=True)
     with open(dest_config_path, "w") as f:
@@ -571,6 +574,107 @@ def _plot_type_conditional_predictions(log_folder: str, expt_label: str, num_typ
     )
     print(f"Wrote classifier accuracy plot to {accuracy_output_path}")
 
+
+def _extract_seed_from_run_name(run_name: str):
+    match = re.search(r"seed=(\d+)", run_name)
+    if match is not None:
+        return int(match.group(1))
+
+    match = re.search(r"_seed(\d+)(?:_|$)", run_name)
+    if match is not None:
+        return int(match.group(1))
+
+    return None
+
+
+def _classifier_checkpoint_for_run(model_dir: str, load_step_type: str = "best"):
+    if load_step_type == "best":
+        checkpoint = os.path.join(model_dir, "best", "classifier.th")
+    else:
+        checkpoint = os.path.join(model_dir, str(load_step_type), "classifier.th")
+
+    if not os.path.exists(checkpoint):
+        raise FileNotFoundError(f"Missing classifier checkpoint: {checkpoint}")
+    return checkpoint
+
+
+def _load_type_conditional_spec_from_classifier_run(model_dir: str,
+                                                    load_step_type: str = "best"):
+    run_name = os.path.basename(model_dir)
+    training_seed = _extract_seed_from_run_name(run_name)
+    if training_seed is None:
+        raise ValueError(f"Could not parse training seed from classifier run: {run_name}")
+
+    config_path = os.path.join(model_dir.replace("models", "sacred"), "1", "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Missing classifier training config: {config_path}")
+
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    trained_agents = config.get("trained_agents", {})
+    if not trained_agents:
+        raise ValueError(f"Classifier run has no trained_agents config: {config_path}")
+
+    agent_cfg = next(iter(trained_agents.values()))
+    if agent_cfg.get("agent_loader") != "type_conditional_loader":
+        raise ValueError(
+            f"Expected type_conditional_loader in classifier run config: {config_path}"
+        )
+
+    classifier_cfg = agent_cfg.get("classifier", {})
+    expert_cfgs = agent_cfg.get("teammate_types", [])
+    uncntrl_agents_config = config.get("uncntrl_agents", {})
+    if not expert_cfgs:
+        raise ValueError(f"Classifier run has no teammate_types: {config_path}")
+    if not uncntrl_agents_config:
+        raise ValueError(f"Classifier run has no uncntrl_agents: {config_path}")
+
+    return {
+        "training_seed": training_seed,
+        "classifier_checkpoint": _classifier_checkpoint_for_run(model_dir, load_step_type),
+        "classifier_cfg": classifier_cfg,
+        "expert_cfgs": expert_cfgs,
+        "uncntrl_agents_config": uncntrl_agents_config,
+        "model_dir": model_dir,
+    }
+
+
+def discover_type_conditional_classifier_specs(classifier_models_root: str,
+                                               load_step_type: str = "best",
+                                               seeds=None):
+    if not os.path.exists(classifier_models_root):
+        raise FileNotFoundError(
+            f"Classifier models root does not exist: {classifier_models_root}"
+        )
+
+    requested_seeds = None if seeds is None else {int(seed) for seed in seeds}
+    specs = []
+    for run_name in sorted(os.listdir(classifier_models_root)):
+        model_dir = os.path.join(classifier_models_root, run_name)
+        if not os.path.isdir(model_dir):
+            continue
+
+        training_seed = _extract_seed_from_run_name(run_name)
+        if training_seed is None:
+            continue
+        if requested_seeds is not None and training_seed not in requested_seeds:
+            continue
+
+        specs.append(
+            _load_type_conditional_spec_from_classifier_run(
+                model_dir,
+                load_step_type=load_step_type,
+            )
+        )
+
+    if not specs:
+        raise RuntimeError(
+            f"No type-conditional classifier runs found under {classifier_models_root}"
+        )
+    return specs
+
+
 def type_conditional_eval(expt_path: str,
                           env_nickname: str,
                           num_agents: int,
@@ -585,7 +689,8 @@ def type_conditional_eval(expt_path: str,
                           skip_existing: bool = True,
                           eval_seed: int = 394820,
                           use_condor: bool = False,
-                          debug: bool = False):
+                          debug: bool = False,
+                          training_seed=None):
     """
     Evaluate a type_conditional_loader policy in the N-k setting.
 
@@ -605,12 +710,14 @@ def type_conditional_eval(expt_path: str,
 
         log_folder = os.path.join(open_eval_path, f"type_conditional-vs-{clean_name}")
         os.makedirs(log_folder, exist_ok=True)
-        print(f"\nCHECKING TYPE_CONDITIONAL VS {clean_name}")
+        seed_msg = f" (training seed {training_seed})" if training_seed is not None else ""
+        print(f"\nCHECKING TYPE_CONDITIONAL{seed_msg} VS {clean_name}")
 
         for k in n_uncontrolled_list:
+            seed_suffix = f"_seed-{training_seed}" if training_seed is not None else ""
             dest_config_path = os.path.join(
                 dest_config_folder,
-                f'{env_nickname}_type_conditional-vs-{clean_name}_n-{k}.yaml',
+                f'{env_nickname}_type_conditional{seed_suffix}-vs-{clean_name}_n-{k}.yaml',
             )
             expt_label = write_type_conditional_temp_config(
                 env_nickname=env_nickname,
@@ -624,6 +731,7 @@ def type_conditional_eval(expt_path: str,
                 uncntrl_agent_cfg=uncntrl_agent_cfg,
                 k=k,
                 num_agents=num_agents,
+                training_seed=training_seed,
             )
 
             if skip_existing and is_result_written(log_folder, expt_label):
@@ -649,6 +757,55 @@ def type_conditional_eval(expt_path: str,
                              alg_config="open_dummy")
                 _plot_type_conditional_predictions(log_folder, expt_label, num_types=len(expert_cfgs))
     return
+
+
+def type_conditional_classifier_runs_eval(expt_path: str,
+                                          env_nickname: str,
+                                          num_agents: int,
+                                          classifier_models_root: str,
+                                          src_config_path: str,
+                                          dest_config_folder: str,
+                                          dest_results_name: str,
+                                          n_uncontrolled_list=None,
+                                          classifier_seeds=None,
+                                          skip_existing: bool = True,
+                                          eval_seed: int = 394820,
+                                          classifier_load_step_type: str = "best",
+                                          use_condor: bool = False,
+                                          debug: bool = False):
+    """
+    Evaluate each trained type-conditional classifier run against the uncontrolled
+    agents from the same training seed.
+    """
+    specs = discover_type_conditional_classifier_specs(
+        classifier_models_root,
+        load_step_type=classifier_load_step_type,
+        seeds=classifier_seeds,
+    )
+    print(
+        "Discovered type-conditional classifier seeds:",
+        [spec["training_seed"] for spec in specs],
+    )
+
+    for spec in specs:
+        type_conditional_eval(
+            expt_path=expt_path,
+            env_nickname=env_nickname,
+            num_agents=num_agents,
+            classifier_checkpoint=spec["classifier_checkpoint"],
+            classifier_cfg=spec["classifier_cfg"],
+            expert_cfgs=spec["expert_cfgs"],
+            uncntrl_agents_config=spec["uncntrl_agents_config"],
+            src_config_path=src_config_path,
+            dest_config_folder=dest_config_folder,
+            dest_results_name=dest_results_name,
+            n_uncontrolled_list=n_uncontrolled_list,
+            skip_existing=skip_existing,
+            eval_seed=eval_seed,
+            use_condor=use_condor,
+            debug=debug,
+            training_seed=spec["training_seed"],
+        )
 
 def perform_eval_condor(env_nickname, dest_config_path, 
                         log_folder, expt_label, condor_log_folder,
@@ -762,98 +919,23 @@ if __name__ == "__main__":
 
 
     if RUN_TYPE_CONDITIONAL:
-        
-        classifier_cfg = {
-            "d_model": 64,
-            "nhead": 4,
-            "num_layers": 6,
-            "ff": 64,
-            "dropout": 0.1,
-            "history_len": 16,
-        }
-
-        poam_expert_cfgs = [
-            {
-                "name": "ippo",
-                "agent_loader": "poam_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/open_train/poam-pqvmq_open/models/poam_baseline_seed=112358_04-02-03-00-00",
-                "load_step": "best",
-                "test_mode": True,
-            },
-            {
-                "name": "qmix",
-                "agent_loader": "poam_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/open_train/poam-pqvmq_open/models/poam_baseline_seed=112358_04-01-10-29-18",
-                "load_step": "best",
-                "test_mode": True,
-            },
-            {
-                "name": "vdn",
-                "agent_loader": "poam_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/open_train/poam-pqvmq_open/models/poam_baseline_seed=112358_04-01-01-07-32",
-                "load_step": "best",
-                "test_mode": True,
-            },
-            {
-                "name": "mappo",
-                "agent_loader": "poam_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/open_train/poam-pqvmq_open/models/poam_baseline_seed=112358_03-31-11-48-33",
-                "load_step": "best",
-                "test_mode": True,
-            },
-            {
-                "name": "iql",
-                "agent_loader": "poam_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/open_train/poam-pqvmq_open/models/poam_baseline_seed=112358_03-30-16-09-21",
-                "load_step": "best",
-                "test_mode": True,
-            },
-        ]
-        type_conditional_uncntrl_agents = {
-            "agent_ippo": {
-                "agent_loader": "rnn_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/ippo/models/ippo_baseline_seed=112358_07-10-14-39-17",
-                "load_step": "best",
-                "n_agents_to_populate": 3,
-                "test_mode": True,
-            },
-            "agent_qmix": {
-                "agent_loader": "rnn_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/qmix/models/qmix_baseline_seed=112358_04-24-12-09-32",
-                "load_step": "best",
-                "n_agents_to_populate": 3,
-                "test_mode": True,
-            },
-            "agent_vdn": {
-                "agent_loader": "rnn_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/vdn/models/vdn_baseline_seed=112358_04-24-12-11-09",
-                "load_step": "best",
-                "n_agents_to_populate": 3,
-                "test_mode": True,
-            },
-            "agent_mappo": {
-                "agent_loader": "rnn_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/mappo/models/mappo_baseline_seed=112358_04-24-12-04-31",
-                "load_step": "best",
-                "n_agents_to_populate": 3,
-                "test_mode": True,
-            },
-            "agent_iql": {
-                "agent_loader": "rnn_eval_agent_loader",
-                "agent_path": "naht_results/mpe-pp/iql/models/iql_baseline_seed=112358_04-24-12-11-40",
-                "load_step": "best",
-                "n_agents_to_populate": 3,
-                "test_mode": True,
-            },
-        }
-
         if RUN_POAM_EXPERT_VS_TYPES:
+            first_spec = discover_type_conditional_classifier_specs(
+                os.path.join(
+                    base_path,
+                    expt_dir,
+                    "open_train",
+                    "poam_lstm_classifier_only",
+                    "models",
+                ),
+                load_step_type="best",
+            )[0]
             poam_expert_vs_type_eval(
                 expt_path=os.path.join(base_path, expt_dir),
                 env_nickname=env_nickname,
                 num_agents=num_agents,
-                expert_cfgs=poam_expert_cfgs,
-                uncntrl_agents_config=type_conditional_uncntrl_agents,
+                expert_cfgs=first_spec["expert_cfgs"],
+                uncntrl_agents_config=first_spec["uncntrl_agents_config"],
                 src_config_path="src/config/open/open_eval_default.yaml",
                 dest_config_folder=f"src/config/temp/poam_expert_eval_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",
                 dest_results_name="poam_expert_nk_eval",
@@ -865,20 +947,24 @@ if __name__ == "__main__":
                 debug=DEBUG,
             )
         else:
-            type_conditional_eval(
+            type_conditional_classifier_runs_eval(
                 expt_path=os.path.join(base_path, expt_dir),
                 env_nickname=env_nickname,
                 num_agents=num_agents,
-                classifier_checkpoint="naht_results/mpe-pp/open_train/classifier_grid/classifier.th",
-                classifier_cfg=classifier_cfg,
-                expert_cfgs=poam_expert_cfgs,
-                uncntrl_agents_config=type_conditional_uncntrl_agents,
+                classifier_models_root=os.path.join(
+                    base_path,
+                    expt_dir,
+                    "open_train",
+                    "poam_lstm_classifier_only",
+                    "models",
+                ),
                 src_config_path="src/config/open/open_type_conditional_pp.yaml",
                 dest_config_folder=f"src/config/temp/type_conditional_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",
-                dest_results_name="type_conditional_nk_eval",
+                dest_results_name="type_conditional_lstm_nk_eval",
                 n_uncontrolled_list=[1, 2],
                 skip_existing=True,
                 eval_seed=EVAL_SEED,
+                classifier_load_step_type="best",
                 use_condor=USE_CONDOR,
                 debug=DEBUG,
             )
@@ -894,14 +980,15 @@ if __name__ == "__main__":
                             # "open_train/poam-pqvmq_aht", # for naht vs aht comparison only
                             # "open_train/ippo-qmq-3trainseeds",
                             # "open_train/poam-qmq-3trainseeds",
+                            # "vdn","qmix","iql","mappo","ippo"
                                       ],
                         target_algs=["vdn", "qmix", "iql", "mappo", "ippo"],
                         # target_algs=["vdn", "ippo"], # for ood alt train/test split
                         # algs_to_eval_seeds=["112358", "1285842", "78590", "38410", "93718"],
                         # algs_to_eval_seeds=["112358"], # for in-distribution eval
-                        algs_to_eval_seeds=["112358_02-19-00-22-08"],
+                        algs_to_eval_seeds=["1285842"],
                         # target_algs_seeds=["1285842", "78590", "38410", "93718"],# not eval on 112358 because that's the training set
-                        target_algs_seeds=["112358"], # for in-distribution eval
+                        target_algs_seeds=["1285842"], # for in-distribution eval
                         # target_algs_seeds=["112358", "1285842", "78590", "38410", "93718"], # for alt train/test split
                         src_config_path="src/config/open/open_eval_default.yaml",
                         dest_config_folder=f"src/config/temp/temp_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",

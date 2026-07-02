@@ -3,6 +3,8 @@
 import os
 import subprocess
 import argparse
+import shlex
+import sys
 
 from utils.nk_eval_utils import ENV_CONFIGS, wait_for_result, cleanup_temp_config
 from utils.str2bool import str2bool
@@ -26,23 +28,23 @@ def perform_eval(env_nickname, dest_config_path, eval_seed, debug, alg_config="o
     env_config_name = ENV_CONFIGS[env_nickname]["env_config"]
     env_args = ENV_CONFIGS[env_nickname]["env_args"]
     dest_config_name = dest_config_path.replace('src/config/', '').replace('.yaml', '')
-    exec = [f"python src/main.py",
-            f"--seed={eval_seed}",
-            f"--env-config={env_config_name}", 
-            f"--config={dest_config_name}",
-            f"--alg-config={alg_config}",
-            "with",
-            *[f"env_args.{k}={str(v)}" for k, v in env_args.items()],
-            ]
-    exec = " ".join(exec)
+    exec_cmd = [sys.executable,
+                "src/main.py",
+                f"--seed={eval_seed}",
+                f"--env-config={env_config_name}",
+                f"--config={dest_config_name}",
+                f"--alg-config={alg_config}",
+                "with",
+                *[f"env_args.{k}={str(v)}" for k, v in env_args.items()],
+                ]
     if debug: 
-        print("RUN_EVAL.PY: exec=", exec)
+        print("RUN_EVAL.PY: exec=", shlex.join(exec_cmd))
         print("RUN_EVAL.PY: dest_config_path=", dest_config_path)
         return
     else:
-        print("RUN_EVAL.PY: exec=", exec)
+        print("RUN_EVAL.PY: exec=", shlex.join(exec_cmd))
         print("RUN_EVAL.PY: dest_config_path=", dest_config_path)
-        subprocess.call(exec, shell=True) # this will wait for the result
+        subprocess.run(exec_cmd, check=True) # this will wait for the result
     if cleanup:
         cleanup_temp_config(dest_config_path)
 

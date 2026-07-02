@@ -1,0 +1,204 @@
+{
+  "jobs": [
+    {
+      "id": "poam-vs-ippo:uncontrolled-seed=38410",
+      "kind": "poam",
+      "agent_type": "ippo",
+      "seed": 38410,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_ippo_uncseed_38410.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_ippo_uncseed_38410 --env-config=sc2 --alg-config=sc2/poam --seed=38410 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-qmix:uncontrolled-seed=38410",
+      "kind": "poam",
+      "agent_type": "qmix",
+      "seed": 38410,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_qmix_uncseed_38410.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_qmix_uncseed_38410 --env-config=sc2 --alg-config=sc2/poam --seed=38410 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-vdn:uncontrolled-seed=38410",
+      "kind": "poam",
+      "agent_type": "vdn",
+      "seed": 38410,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_vdn_uncseed_38410.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_vdn_uncseed_38410 --env-config=sc2 --alg-config=sc2/poam --seed=38410 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-mappo:uncontrolled-seed=38410",
+      "kind": "poam",
+      "agent_type": "mappo",
+      "seed": 38410,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_mappo_uncseed_38410.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_mappo_uncseed_38410 --env-config=sc2 --alg-config=sc2/poam --seed=38410 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-iql:uncontrolled-seed=38410",
+      "kind": "poam",
+      "agent_type": "iql",
+      "seed": 38410,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_iql_uncseed_38410.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_iql_uncseed_38410 --env-config=sc2 --alg-config=sc2/poam --seed=38410 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-ippo:uncontrolled-seed=78590",
+      "kind": "poam",
+      "agent_type": "ippo",
+      "seed": 78590,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_ippo_uncseed_78590.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_ippo_uncseed_78590 --env-config=sc2 --alg-config=sc2/poam --seed=78590 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-qmix:uncontrolled-seed=78590",
+      "kind": "poam",
+      "agent_type": "qmix",
+      "seed": 78590,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_qmix_uncseed_78590.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_qmix_uncseed_78590 --env-config=sc2 --alg-config=sc2/poam --seed=78590 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-vdn:uncontrolled-seed=78590",
+      "kind": "poam",
+      "agent_type": "vdn",
+      "seed": 78590,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_vdn_uncseed_78590.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_vdn_uncseed_78590 --env-config=sc2 --alg-config=sc2/poam --seed=78590 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-mappo:uncontrolled-seed=78590",
+      "kind": "poam",
+      "agent_type": "mappo",
+      "seed": 78590,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_mappo_uncseed_78590.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_mappo_uncseed_78590 --env-config=sc2 --alg-config=sc2/poam --seed=78590 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-iql:uncontrolled-seed=78590",
+      "kind": "poam",
+      "agent_type": "iql",
+      "seed": 78590,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_iql_uncseed_78590.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_iql_uncseed_78590 --env-config=sc2 --alg-config=sc2/poam --seed=78590 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-ippo:uncontrolled-seed=93718",
+      "kind": "poam",
+      "agent_type": "ippo",
+      "seed": 93718,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_ippo_uncseed_93718.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_ippo_uncseed_93718 --env-config=sc2 --alg-config=sc2/poam --seed=93718 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-qmix:uncontrolled-seed=93718",
+      "kind": "poam",
+      "agent_type": "qmix",
+      "seed": 93718,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_qmix_uncseed_93718.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_qmix_uncseed_93718 --env-config=sc2 --alg-config=sc2/poam --seed=93718 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-vdn:uncontrolled-seed=93718",
+      "kind": "poam",
+      "agent_type": "vdn",
+      "seed": 93718,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_vdn_uncseed_93718.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_vdn_uncseed_93718 --env-config=sc2 --alg-config=sc2/poam --seed=93718 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-mappo:uncontrolled-seed=93718",
+      "kind": "poam",
+      "agent_type": "mappo",
+      "seed": 93718,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_mappo_uncseed_93718.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_mappo_uncseed_93718 --env-config=sc2 --alg-config=sc2/poam --seed=93718 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-iql:uncontrolled-seed=93718",
+      "kind": "poam",
+      "agent_type": "iql",
+      "seed": 93718,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_iql_uncseed_93718.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_iql_uncseed_93718 --env-config=sc2 --alg-config=sc2/poam --seed=93718 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-ippo:uncontrolled-seed=112358",
+      "kind": "poam",
+      "agent_type": "ippo",
+      "seed": 112358,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_ippo_uncseed_112358.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_ippo_uncseed_112358 --env-config=sc2 --alg-config=sc2/poam --seed=112358 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-qmix:uncontrolled-seed=112358",
+      "kind": "poam",
+      "agent_type": "qmix",
+      "seed": 112358,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_qmix_uncseed_112358.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_qmix_uncseed_112358 --env-config=sc2 --alg-config=sc2/poam --seed=112358 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-vdn:uncontrolled-seed=112358",
+      "kind": "poam",
+      "agent_type": "vdn",
+      "seed": 112358,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_vdn_uncseed_112358.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_vdn_uncseed_112358 --env-config=sc2 --alg-config=sc2/poam --seed=112358 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-mappo:uncontrolled-seed=112358",
+      "kind": "poam",
+      "agent_type": "mappo",
+      "seed": 112358,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_mappo_uncseed_112358.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_mappo_uncseed_112358 --env-config=sc2 --alg-config=sc2/poam --seed=112358 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-iql:uncontrolled-seed=112358",
+      "kind": "poam",
+      "agent_type": "iql",
+      "seed": 112358,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_iql_uncseed_112358.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_iql_uncseed_112358 --env-config=sc2 --alg-config=sc2/poam --seed=112358 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-ippo:uncontrolled-seed=1285842",
+      "kind": "poam",
+      "agent_type": "ippo",
+      "seed": 1285842,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_ippo_uncseed_1285842.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_ippo_uncseed_1285842 --env-config=sc2 --alg-config=sc2/poam --seed=1285842 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-qmix:uncontrolled-seed=1285842",
+      "kind": "poam",
+      "agent_type": "qmix",
+      "seed": 1285842,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_qmix_uncseed_1285842.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_qmix_uncseed_1285842 --env-config=sc2 --alg-config=sc2/poam --seed=1285842 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-vdn:uncontrolled-seed=1285842",
+      "kind": "poam",
+      "agent_type": "vdn",
+      "seed": 1285842,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_vdn_uncseed_1285842.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_vdn_uncseed_1285842 --env-config=sc2 --alg-config=sc2/poam --seed=1285842 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-mappo:uncontrolled-seed=1285842",
+      "kind": "poam",
+      "agent_type": "mappo",
+      "seed": 1285842,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_mappo_uncseed_1285842.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_mappo_uncseed_1285842 --env-config=sc2 --alg-config=sc2/poam --seed=1285842 with env_args.map_name=3s_vs_5z"
+    },
+    {
+      "id": "poam-vs-iql:uncontrolled-seed=1285842",
+      "kind": "poam",
+      "agent_type": "iql",
+      "seed": 1285842,
+      "config": "src/config/generated_remaining_3sv5z/poam_vs_iql_uncseed_1285842.yaml",
+      "command": "/home/jupyter-jphuser3/.conda/envs/mbnaht/bin/python src/main.py --config=generated_remaining_3sv5z/poam_vs_iql_uncseed_1285842 --env-config=sc2 --alg-config=sc2/poam --seed=1285842 with env_args.map_name=3s_vs_5z"
+    }
+  ]
+}

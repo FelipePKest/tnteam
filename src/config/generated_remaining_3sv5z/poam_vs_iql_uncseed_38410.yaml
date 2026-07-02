@@ -1,0 +1,54 @@
+runner: parallel
+mac: open_train_mac
+env: sc2
+non_overridable:
+- mac
+env_args:
+  map_name: 3s_vs_5z
+batch_size_run: 8
+test_nepisode: 128
+test_interval: 50000
+test_greedy: true
+log_interval: 50000
+runner_log_interval: 50000
+learner_log_interval: 50000
+t_max: 20000050
+use_cuda: true
+buffer_cpu_only: true
+log_discounted_return: false
+use_tensorboard: true
+save_model: true
+save_model_interval: 2000000
+checkpoint_path: ''
+render: false
+gamma: 0.99
+batch_size: 32
+buffer_size: 32
+lr: 0.0005
+optim_alpha: 0.99
+optim_eps: 1.0e-05
+grad_norm_clip: 10
+add_value_last_step: true
+agent: rnn
+use_rnn: true
+hidden_dim: 64
+obs_last_action: true
+test_verbose: false
+save_replay: false
+eval_mode: null
+local_results_path: 3sv5z/open_train/poam-pqvmq_open
+n_uncontrolled: null
+trained_agents:
+  agent_0:
+    agent_loader: rnn_train_agent_loader
+    agent_path: ''
+uncntrl_agents:
+  agent_iql:
+    agent_loader: rnn_eval_agent_loader
+    agent_path: 3sv5z/iql/models/iql_baseline_seed=38410_07-01-15-43-11
+    load_step: best
+    n_agents_to_populate: 3
+    test_mode: true
+repeat_id: 1
+label: baseline
+hypergroup: null

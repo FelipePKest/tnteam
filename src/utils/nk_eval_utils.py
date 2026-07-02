@@ -68,6 +68,12 @@ def get_runs(algorithm: str, expt_path: str, expt_basenames: list):
         runs = [*runs, *ret]
     return runs
 
+def _algo_matches_existing_pair(requested_algo, existing_algo):
+    requested_algo = requested_algo.replace("-", "_")
+    requested_family = requested_algo.split("_", 1)[0]
+    return existing_algo in {requested_algo, requested_family}
+
+
 def all_pairs(
         algo_i: str, algo_j: str,
         algo_i_runs: list, algo_j_runs: list, 
@@ -84,11 +90,15 @@ def all_pairs(
     algo_i = algo_i.replace("-", "_")
     algo_j = algo_j.replace("-", "_")
     for (algo1_nm, algo1_seed), (algo2_nm, algo2_seed) in existing_seed_pairs:
-        if algo_i != algo1_nm:
-            print(f"Warning: algo_i {algo_i} does not match algo1_nm {algo1_nm}")
-        if algo_j != algo2_nm:
-            print(f"Warning: algo_j {algo_j} does not match algo2_nm {algo2_nm}")
+        if not _algo_matches_existing_pair(algo_i, algo1_nm):
+            print(f"Skipping existing seed pair for {algo1_nm}; current algo_i is {algo_i}")
+            continue
+        if not _algo_matches_existing_pair(algo_j, algo2_nm):
+            print(f"Skipping existing seed pair for {algo2_nm}; current algo_j is {algo_j}")
+            continue
             
+        matched_i_path = None
+        matched_j_path = None
         for algo_i_path in algo_i_runs:
             if algo1_seed in algo_i_path:
                 matched_i_path = algo_i_path
@@ -97,6 +107,9 @@ def all_pairs(
             if algo2_seed in algo_j_path:
                 matched_j_path = algo_j_path
                 break
+        if matched_i_path is None or matched_j_path is None:
+            print(f"Skipping existing seed pair without matching runs: {algo1_seed}, {algo2_seed}")
+            continue
         run_pairs.append((matched_i_path, matched_j_path))
 
     ### generate all possible pairs pairs for algo i and algo j ###
@@ -127,11 +140,15 @@ def random_pairs(
     algo_i = algo_i.replace("-", "_")
     algo_j = algo_j.replace("-", "_")
     for (algo1_nm, algo1_seed), (algo2_nm, algo2_seed) in existing_seed_pairs:
-        if algo_i != algo1_nm:
-            print(f"Warning: algo_i {algo_i} does not match algo1_nm {algo1_nm}")
-        if algo_j != algo2_nm:
-            print(f"Warning: algo_j {algo_j} does not match algo2_nm {algo2_nm}")
+        if not _algo_matches_existing_pair(algo_i, algo1_nm):
+            print(f"Skipping existing seed pair for {algo1_nm}; current algo_i is {algo_i}")
+            continue
+        if not _algo_matches_existing_pair(algo_j, algo2_nm):
+            print(f"Skipping existing seed pair for {algo2_nm}; current algo_j is {algo_j}")
+            continue
             
+        matched_i_path = None
+        matched_j_path = None
         for algo_i_path in algo_i_runs:
             if algo1_seed in algo_i_path:
                 matched_i_path = algo_i_path
@@ -140,6 +157,9 @@ def random_pairs(
             if algo2_seed in algo_j_path:
                 matched_j_path = algo_j_path
                 break
+        if matched_i_path is None or matched_j_path is None:
+            print(f"Skipping existing seed pair without matching runs: {algo1_seed}, {algo2_seed}")
+            continue
         if algo_i == algo_j:
             if match_selfplay_seeds: # only add the pair if the paths are the same
                 if matched_i_path == matched_j_path:

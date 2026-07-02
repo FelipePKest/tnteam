@@ -109,6 +109,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Generated training plans/configs
+remaining_mpe_pp_jobs.json
+src/config/generated_remaining_mpe_pp/
+
 # C extensions
 *.so
 
@@ -261,3 +265,10 @@ naht_results/*
 
 *.png
 *.th
+
+__MACOSX/
+3rdparty/
+.ipynb_checkpoints/
+
+*.out
+*.log

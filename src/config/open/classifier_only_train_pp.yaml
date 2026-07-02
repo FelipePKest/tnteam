@@ -23,7 +23,7 @@ test_greedy: True
 log_interval: 50000
 runner_log_interval: 50000
 learner_log_interval: 50000
-t_max: 20050000
+t_max: 40050000
 use_cuda: True
 buffer_cpu_only: True
 log_discounted_return: False

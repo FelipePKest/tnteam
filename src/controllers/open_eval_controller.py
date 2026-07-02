@@ -132,7 +132,7 @@ class OpenEvalMAC:
                 continue
 
             for i in range(agent_cfg["n_agents_to_populate"]):
-                model_path = agent_cfg["agent_path"]
+                model_path = self._resolve_model_path(agent_cfg["agent_path"], base_uncntrl_path)
                 agent = agent_loader_REGISTRY[loader_key](
                     args=self.args,
                     scheme=scheme,
@@ -173,7 +173,7 @@ class OpenEvalMAC:
                         args=self.args, scheme=scheme, bot_name=agent_cfg["bot_name"]
                     )
                 else:
-                    model_path = agent_cfg["agent_path"]
+                    model_path = self._resolve_model_path(agent_cfg["agent_path"], base_uncntrl_path)
                     agent = agent_loader_REGISTRY[loader_key](
                         args=self.args,
                         scheme=scheme,
@@ -191,6 +191,11 @@ class OpenEvalMAC:
         for agent in self.classifier_agents:
             if hasattr(agent, "set_label_mapping"):
                 agent.set_label_mapping(self.uncontrolled_team_name_to_idx)
+
+    def _resolve_model_path(self, model_path, base_path):
+        if os.path.isabs(model_path) or os.path.exists(model_path):
+            return model_path
+        return os.path.join(base_path, model_path)
 
     def get_classifier_accuracy(self):
         accuracies = []
