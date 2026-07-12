@@ -85,6 +85,13 @@ class ParallelRunner:
                 device=self.batch.device,
             )
             self.batch.update({"uncontrolled_team_idx": team_labels})
+            if "policy_type" in self.scheme:
+                policy_type_labels = self.compute_policy_type_labels(
+                    self.batch,
+                    self.trained_agent_idxs,
+                    team_idx,
+                )
+                self.batch.update({"policy_type": policy_type_labels})
 
         # Reset the envs
         for parent_conn in self.parent_conns:
@@ -321,6 +328,24 @@ class ParallelRunner:
         # set entries of agent_mask coresponding to trained agents to 1
         agent_mask[:, :, agent_idx_list] = 1.0
         return agent_mask
+
+    def compute_policy_type_labels(self, batch, trained_agent_idx_list, team_idx):
+        '''Label uncontrolled agents with their sampled policy type; controlled agents are ignored.'''
+        policy_type = np.full(
+            (batch.batch_size, batch.max_seq_length, self.args.n_agents, 1),
+            -1,
+            dtype=np.int64,
+        )
+        if team_idx < 0:
+            return policy_type
+
+        trained_agent_idxs = set(trained_agent_idx_list)
+        uncontrolled_agent_idxs = [
+            agent_idx for agent_idx in range(self.args.n_agents)
+            if agent_idx not in trained_agent_idxs
+        ]
+        policy_type[:, :, uncontrolled_agent_idxs, 0] = team_idx
+        return policy_type
                             
 def env_worker(remote, env_fn):
     # Make environment

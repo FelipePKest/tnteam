@@ -36,6 +36,7 @@ class EpisodeRunner:
         self.new_batch = partial(EpisodeBatch, scheme, groups, self.batch_size_run, self.episode_limit + 1,
                                  preprocess=preprocess, device=self.args.device)
         self.mac = mac
+        self.scheme = scheme
 
     def get_env_info(self):
         return self.env.get_env_info()
@@ -63,6 +64,13 @@ class EpisodeRunner:
                 device=self.batch.device,
             )
             self.batch.update({"uncontrolled_team_idx": team_labels})
+            if "policy_type" in self.scheme:
+                policy_type_labels = self.compute_policy_type_labels(
+                    self.batch,
+                    self.trained_agent_idxs,
+                    team_idx,
+                )
+                self.batch.update({"policy_type": policy_type_labels})
         self.env.reset()
         self.t = 0
 
@@ -178,6 +186,13 @@ class EpisodeRunner:
                 device=self.batch.device,
             )
             self.batch.update({"uncontrolled_team_idx": team_labels})
+            if "policy_type" in self.scheme:
+                policy_type_labels = self.compute_policy_type_labels(
+                    self.batch,
+                    self.trained_agent_idxs,
+                    team_idx,
+                )
+                self.batch.update({"policy_type": policy_type_labels})
 
         return self.batch, mean_test_return
 
@@ -234,3 +249,21 @@ class EpisodeRunner:
         # set entires of agent_mask coresponding to trained agents to 1
         agent_mask[:, :, agent_idx_list] = 1.0
         return agent_mask
+
+    def compute_policy_type_labels(self, batch, trained_agent_idx_list, team_idx):
+        '''Label uncontrolled agents with their sampled policy type; controlled agents are ignored.'''
+        policy_type = np.full(
+            (batch.batch_size, batch.max_seq_length, self.args.n_agents, 1),
+            -1,
+            dtype=np.int64,
+        )
+        if team_idx < 0:
+            return policy_type
+
+        trained_agent_idxs = set(trained_agent_idx_list)
+        uncontrolled_agent_idxs = [
+            agent_idx for agent_idx in range(self.args.n_agents)
+            if agent_idx not in trained_agent_idxs
+        ]
+        policy_type[:, :, uncontrolled_agent_idxs, 0] = team_idx
+        return policy_type
