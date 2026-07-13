@@ -12,6 +12,7 @@ from .policy_repr_poam_learner import (
 )
 from .clam_learner import CLAMLearner
 from .classifier_learner import ClassifierLearner
+from .policy_repr_poam_leaner import PolicyRepresentationPOAMLearner
 
 REGISTRY = {}
 REGISTRY["q_learner"] = QLearner
@@ -26,3 +27,4 @@ REGISTRY["poam_learner"] = POAMLearner
 REGISTRY["policy_repr_poam_learner"] = PolicyReprPOAMLearner
 REGISTRY["clam_learner"] = CLAMLearner
 REGISTRY["classifier_learner"] = ClassifierLearner
+REGISTRY["policy_repr_poam_learner"] = PolicyRepresentationPOAMLearner

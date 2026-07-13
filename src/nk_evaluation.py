@@ -126,7 +126,35 @@ def cross_eval(expt_path: str,
                                          eval_seed=eval_seed,
                                          debug=debug)
     return       
-             
+
+def _baseline_seed_from_path(model_path: str):
+    run_name = os.path.basename(model_path)
+    match = re.search(r"_baseline_seed=(\d+)", run_name)
+    return match.group(1) if match else None
+
+def matching_seed_pairs(runs_to_eval: list, runs_target: list):
+    """Pair evaluation and target runs by identical training seed.
+
+    If multiple run directories exist for the same seed, keep the last
+    lexicographic path. The run names include timestamps, so this selects the
+    latest run for duplicate seed directories.
+    """
+    eval_by_seed = {}
+    target_by_seed = {}
+
+    for run_path in sorted(runs_to_eval):
+        seed = _baseline_seed_from_path(run_path)
+        if seed is not None:
+            eval_by_seed[seed] = run_path
+
+    for run_path in sorted(runs_target):
+        seed = _baseline_seed_from_path(run_path)
+        if seed is not None:
+            target_by_seed[seed] = run_path
+
+    matched_seeds = sorted(set(eval_by_seed) & set(target_by_seed), key=int)
+    return [(eval_by_seed[seed], target_by_seed[seed]) for seed in matched_seeds]
+
 def target_set_eval(expt_path: str, 
                expt_basenames: list,
                env_nickname: str, 
@@ -141,6 +169,7 @@ def target_set_eval(expt_path: str,
                skip_existing: bool = True,
                eval_seed: int = 394820,
                load_step_type: str = "best",
+               match_training_seeds: bool = False,
                use_condor: bool = False,
                debug: bool=False):
     # Create the open_eval folder if it doesn't exist
@@ -170,8 +199,10 @@ def target_set_eval(expt_path: str,
             runs_target = get_runs(algo_target, os.path.join(expt_path, algo_target_dir), 
                                    expt_basenames=target_expt_basenames_seeds)
 
+            if match_training_seeds:
+                run_pairs = matching_seed_pairs(runs_to_eval, runs_target)
             # Get previously evaluated seed pairs and sample new if needed
-            if skip_existing and os.path.exists(os.path.join(log_folder, "sacred")):
+            elif skip_existing and os.path.exists(os.path.join(log_folder, "sacred")):
                 existing_seed_pairs = get_seed_pairs(log_folder)
                 print("Existing seed pairs:", existing_seed_pairs)
                 print("Log folder: ", log_folder)
@@ -241,7 +272,8 @@ def write_type_conditional_temp_config(env_nickname: str,
                                        uncntrl_agent_cfg: dict,
                                        k: int,
                                        num_agents: int,
-                                       training_seed=None):
+                                       training_seed=None,
+                                       eval_seed=None):
     """Write a temp config for classifier-conditioned POAM expert evaluation."""
     with open(src_config_path) as f:
         conf = yaml.load(f, Loader=yaml.FullLoader)
@@ -272,14 +304,14 @@ def write_type_conditional_temp_config(env_nickname: str,
     if clean_name.startswith("agent_"):
         clean_name = clean_name[len("agent_"):]
     seed_suffix = f"_seed={training_seed}" if training_seed is not None else ""
-    conf['label'] = f"type_conditional_{clean_name}{seed_suffix}_n-{k}"
+    eval_seed_suffix = f"_eval_seed={eval_seed}" if eval_seed is not None else ""
+    conf['label'] = f"type_conditional_{clean_name}{seed_suffix}_n-{k}{eval_seed_suffix}"
 
     os.makedirs(os.path.dirname(dest_config_path), exist_ok=True)
     with open(dest_config_path, "w") as f:
         yaml.dump(conf, f)
 
     return conf['label']
-
 
 def poam_expert_vs_type_eval(expt_path: str,
                              env_nickname: str,
@@ -366,13 +398,11 @@ def poam_expert_vs_type_eval(expt_path: str,
                     )
     return
 
-
 def _find_sacred_run_dir(log_folder: str, expt_label: str):
     paths = get_expt_paths(base_folder=log_folder, subfolder="sacred", expt_regex=expt_label)
     if not paths:
         return None
     return os.path.join(sorted(paths)[-1], "1")
-
 
 def _split_prediction_episodes(predictions: list):
     if not predictions:
@@ -399,7 +429,6 @@ def _split_prediction_episodes(predictions: list):
     if current_episode:
         episodes.append(current_episode)
     return episodes
-
 
 def _plot_prediction_episode(predictions: list, output_path: str, title: str):
     if not predictions:
@@ -477,7 +506,6 @@ def _plot_prediction_episode(predictions: list, output_path: str, title: str):
     plt.savefig(output_path, dpi=200)
     plt.close()
 
-
 def _prediction_is_correct(entry: dict):
     is_correct = entry.get("is_correct")
     if is_correct is not None:
@@ -493,7 +521,6 @@ def _prediction_is_correct(entry: dict):
     if pred_idx is None or true_idx is None:
         return None
     return pred_idx == true_idx
-
 
 def _plot_prediction_accuracy_over_timesteps(
     predictions: list,
@@ -542,7 +569,6 @@ def _plot_prediction_accuracy_over_timesteps(
     plt.savefig(output_path, dpi=200)
     plt.close()
 
-
 def _plot_type_conditional_predictions(log_folder: str, expt_label: str, num_types: int = 5):
     run_dir = _find_sacred_run_dir(log_folder, expt_label)
     if run_dir is None:
@@ -574,7 +600,6 @@ def _plot_type_conditional_predictions(log_folder: str, expt_label: str, num_typ
     )
     print(f"Wrote classifier accuracy plot to {accuracy_output_path}")
 
-
 def _extract_seed_from_run_name(run_name: str):
     match = re.search(r"seed=(\d+)", run_name)
     if match is not None:
@@ -586,7 +611,6 @@ def _extract_seed_from_run_name(run_name: str):
 
     return None
 
-
 def _classifier_checkpoint_for_run(model_dir: str, load_step_type: str = "best"):
     if load_step_type == "best":
         checkpoint = os.path.join(model_dir, "best", "classifier.th")
@@ -596,7 +620,6 @@ def _classifier_checkpoint_for_run(model_dir: str, load_step_type: str = "best")
     if not os.path.exists(checkpoint):
         raise FileNotFoundError(f"Missing classifier checkpoint: {checkpoint}")
     return checkpoint
-
 
 def _load_type_conditional_spec_from_classifier_run(model_dir: str,
                                                     load_step_type: str = "best"):
@@ -639,7 +662,6 @@ def _load_type_conditional_spec_from_classifier_run(model_dir: str,
         "model_dir": model_dir,
     }
 
-
 def discover_type_conditional_classifier_specs(classifier_models_root: str,
                                                load_step_type: str = "best",
                                                seeds=None):
@@ -673,7 +695,6 @@ def discover_type_conditional_classifier_specs(classifier_models_root: str,
             f"No type-conditional classifier runs found under {classifier_models_root}"
         )
     return specs
-
 
 def type_conditional_eval(expt_path: str,
                           env_nickname: str,
@@ -715,9 +736,10 @@ def type_conditional_eval(expt_path: str,
 
         for k in n_uncontrolled_list:
             seed_suffix = f"_seed-{training_seed}" if training_seed is not None else ""
+            eval_seed_suffix = f"_eval-seed-{eval_seed}" if eval_seed is not None else ""
             dest_config_path = os.path.join(
                 dest_config_folder,
-                f'{env_nickname}_type_conditional{seed_suffix}-vs-{clean_name}_n-{k}.yaml',
+                f'{env_nickname}_type_conditional{seed_suffix}-vs-{clean_name}_n-{k}{eval_seed_suffix}.yaml',
             )
             expt_label = write_type_conditional_temp_config(
                 env_nickname=env_nickname,
@@ -732,6 +754,7 @@ def type_conditional_eval(expt_path: str,
                 k=k,
                 num_agents=num_agents,
                 training_seed=training_seed,
+                eval_seed=eval_seed,
             )
 
             if skip_existing and is_result_written(log_folder, expt_label):
@@ -757,7 +780,6 @@ def type_conditional_eval(expt_path: str,
                              alg_config="open_dummy")
                 _plot_type_conditional_predictions(log_folder, expt_label, num_types=len(expert_cfgs))
     return
-
 
 def type_conditional_classifier_runs_eval(expt_path: str,
                                           env_nickname: str,
@@ -947,56 +969,49 @@ if __name__ == "__main__":
                 debug=DEBUG,
             )
         else:
-            type_conditional_classifier_runs_eval(
-                expt_path=os.path.join(base_path, expt_dir),
-                env_nickname=env_nickname,
-                num_agents=num_agents,
-                classifier_models_root=os.path.join(
-                    base_path,
-                    expt_dir,
-                    "open_train",
-                    "poam_lstm_classifier_only",
-                    "models",
-                ),
-                src_config_path="src/config/open/open_type_conditional_pp.yaml",
-                dest_config_folder=f"src/config/temp/type_conditional_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",
-                dest_results_name="type_conditional_lstm_nk_eval",
-                n_uncontrolled_list=[1, 2],
-                skip_existing=True,
-                eval_seed=EVAL_SEED,
-                classifier_load_step_type="best",
-                use_condor=USE_CONDOR,
-                debug=DEBUG,
-            )
+            for i in range(0, 5):
+                type_conditional_classifier_runs_eval(
+                    expt_path=os.path.join(base_path, expt_dir),
+                    env_nickname=env_nickname,
+                    num_agents=num_agents,
+                    classifier_models_root=os.path.join(
+                        base_path,
+                        expt_dir,
+                        "open_train",
+                        "poam_lstm_classifier_only",
+                        "models",
+                    ),
+                    src_config_path="src/config/open/open_type_conditional_pp.yaml",
+                    dest_config_folder=f"src/config/temp/type_conditional_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",
+                    dest_results_name="type_conditional_lstm_nk_eval",
+                    n_uncontrolled_list=[1, 2],
+                    skip_existing=True,
+                    eval_seed=EVAL_SEED+i,
+                    classifier_load_step_type="best",
+                    use_condor=USE_CONDOR,
+                    debug=DEBUG,
+                )
 
     if RUN_TARGET_SET:
-        target_set_eval(expt_path=os.path.join(base_path, expt_dir),
-                        expt_basenames=["baseline"],
-                        env_nickname=env_nickname,
-                        num_agents=num_agents,
-                        algs_to_eval=[
-                            # "open_train/ippo-pqvmq_open",
-                            "open_train/poam-pqvmq_open",
-                            # "open_train/poam-pqvmq_aht", # for naht vs aht comparison only
-                            # "open_train/ippo-qmq-3trainseeds",
-                            # "open_train/poam-qmq-3trainseeds",
-                            # "vdn","qmix","iql","mappo","ippo"
-                                      ],
-                        target_algs=["vdn", "qmix", "iql", "mappo", "ippo"],
-                        # target_algs=["vdn", "ippo"], # for ood alt train/test split
-                        # algs_to_eval_seeds=["112358", "1285842", "78590", "38410", "93718"],
-                        # algs_to_eval_seeds=["112358"], # for in-distribution eval
-                        algs_to_eval_seeds=["1285842"],
-                        # target_algs_seeds=["1285842", "78590", "38410", "93718"],# not eval on 112358 because that's the training set
-                        target_algs_seeds=["1285842"], # for in-distribution eval
-                        # target_algs_seeds=["112358", "1285842", "78590", "38410", "93718"], # for alt train/test split
-                        src_config_path="src/config/open/open_eval_default.yaml",
-                        dest_config_folder=f"src/config/temp/temp_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",
-                        # dest_results_name="ood_generalization",
-                        dest_results_name="in_distr_eval",
-                        # dest_results_name="ood_gen_vp",
-                        eval_seed=EVAL_SEED,
-                        load_step_type="best",
-                        use_condor=USE_CONDOR,
-                        debug=DEBUG
-                        )
+        # Compare each specialized POAM policy against its corresponding
+        # uncontrolled baseline for every trained seed.
+        trained_seeds = ["38410", "78590", "93718", "112358", "1285842"]
+        for target_alg in ["vdn", "qmix", "iql", "mappo", "ippo"]:
+            target_set_eval(expt_path=os.path.join(base_path, expt_dir),
+                            expt_basenames=["baseline"],
+                            env_nickname=env_nickname,
+                            num_agents=num_agents,
+                            algs_to_eval=[f"open_train/poam-vs-{target_alg}"],
+                            skip_existing=True,
+                            target_algs=[target_alg],
+                            algs_to_eval_seeds=trained_seeds,
+                            target_algs_seeds=trained_seeds,
+                            src_config_path="src/config/open/open_eval_default.yaml",
+                            dest_config_folder=f"src/config/temp/temp_{datetime.datetime.now().strftime('%m-%d-%H-%M-%S')}/",
+                            dest_results_name="in_distr_eval",
+                            eval_seed=EVAL_SEED,
+                            load_step_type="best",
+                            match_training_seeds=True,
+                            use_condor=USE_CONDOR,
+                            debug=DEBUG
+                            )

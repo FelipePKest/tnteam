@@ -53,6 +53,11 @@ class CLAMTrainAgentLoader(BaseAgentLoader):
             t_env,
             test_mode=test_mode,
         )
+        # Action selectors drop the singleton action-value dimension while
+        # sampling, but open-training controllers concatenate their results
+        # with evaluation loaders that preserve it. Keep the loader contract
+        # as [batch, time, agent, action_value] in both train and test modes.
+        actions = actions.reshape(*outputs.shape[:-1], 1)
         return outputs, actions, hidden
 
     def set_encoder(self, encoder):

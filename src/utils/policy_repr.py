@@ -109,3 +109,61 @@ def masked_cross_entropy(logits, targets, mask, n_classes, ignore_index=None):
     )
 
     return (loss_flat * mask_flat).sum() / (mask_flat.sum() + 1e-8)
+
+
+def masked_accuracy(logits, targets, mask, ignore_index=None):
+    preds = th.argmax(logits, dim=-1)
+    targets_flat = targets.reshape(-1)
+    preds_flat = preds.reshape(-1)
+    mask_flat = mask.reshape(-1).float()
+
+    if ignore_index is not None:
+        valid = targets_flat != ignore_index
+        mask_flat = mask_flat * valid.float()
+
+    correct = (preds_flat == targets_flat).float() * mask_flat
+    return correct.sum() / (mask_flat.sum() + 1e-8)
+
+
+def supervised_contrastive_loss(embeddings, labels, mask, temperature=0.2, max_samples=2048):
+    """
+    Supervised contrastive loss over valid policy-type labels.
+
+    Args:
+        embeddings: Tensor with shape (bs, t, n_agents, embed_dim)
+        labels: Tensor with shape (bs, t, n_agents), -1 for ignored samples
+        mask: Tensor with shape (bs, t, n_agents)
+    """
+    emb = embeddings.reshape(-1, embeddings.shape[-1])
+    labels = labels.reshape(-1).long()
+    mask = mask.reshape(-1).float()
+    valid = (mask > 0) & (labels >= 0)
+
+    valid_idx = th.nonzero(valid, as_tuple=False).squeeze(-1)
+    if valid_idx.numel() <= 1:
+        return emb.sum() * 0.0
+
+    if max_samples is not None and max_samples > 0 and valid_idx.numel() > max_samples:
+        perm = th.randperm(valid_idx.numel(), device=embeddings.device)[:max_samples]
+        valid_idx = valid_idx[perm]
+
+    emb = F.normalize(emb[valid_idx], dim=-1)
+    labels = labels[valid_idx]
+
+    logits = th.matmul(emb, emb.transpose(0, 1)) / temperature
+    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
+
+    self_mask = th.eye(logits.shape[0], device=logits.device, dtype=th.bool)
+    positive_mask = labels.unsqueeze(0).eq(labels.unsqueeze(1)) & (~self_mask)
+
+    has_positive = positive_mask.any(dim=1)
+    if not has_positive.any():
+        return emb.sum() * 0.0
+
+    exp_logits = th.exp(logits) * (~self_mask).float()
+    log_prob = logits - th.log(exp_logits.sum(dim=1, keepdim=True) + 1e-8)
+    mean_log_prob_pos = (positive_mask.float() * log_prob).sum(dim=1) / (
+        positive_mask.float().sum(dim=1) + 1e-8
+    )
+
+    return -mean_log_prob_pos[has_positive].mean()

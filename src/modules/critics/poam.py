@@ -23,8 +23,10 @@ class POAMCritic(nn.Module):
         self.output_type = "v"
 
         self.encoder = None
+        self.use_policy_context = getattr(args, "critic_policy_context", False)
+        critic_embed_dim = args.embed_dim * (2 if self.use_policy_context else 1)
         # Set up network layers
-        self.base = MLPBase(self.input_size + args.embed_dim, 
+        self.base = MLPBase(self.input_size + critic_embed_dim,
                             self.hidden_dim, 
                             n_hidden_layers=1,
                             use_feature_norm=args.use_obs_norm, 
@@ -79,9 +81,12 @@ class POAMCritic(nn.Module):
         enc_inputs = enc_inputs.reshape(-1, enc_input_size)
         embeddings, h_e = self.encoder(enc_inputs, h_e)    
 
-        # create 0s tensor that is same shape as embeddings
-        # start forward pass   
-        inputs = th.cat([embeddings.detach(), inputs], dim=1)
+        critic_embeddings = embeddings.detach()
+        if self.use_policy_context:
+            context = self._build_policy_context(batch, critic_embeddings, orig_batch_dims, t=t)
+            critic_embeddings = th.cat([critic_embeddings, context], dim=-1)
+
+        inputs = th.cat([critic_embeddings, inputs], dim=1)
         x = self.base(inputs)
 
         if self.args.use_rnn:
@@ -97,6 +102,20 @@ class POAMCritic(nn.Module):
         h_e = h_e.view(*orig_batch_dims, -1)
         h_out = h_out.view(*orig_batch_dims, -1)
         return q.view(*orig_batch_dims, -1), h_e, h_out
+
+    def _build_policy_context(self, batch, embeddings, orig_batch_dims, t=None):
+        embeddings = embeddings.view(*orig_batch_dims, -1)
+
+        if hasattr(self.args, "open_train_or_eval") and self.args.open_train_or_eval and "trainable_agents" in batch.scheme:
+            ts = slice(None) if t is None else slice(t, t + 1)
+            uncontrolled = (~batch["trainable_agents"][:, ts].squeeze(-1)).float()
+            denom = uncontrolled.sum(dim=2, keepdim=True).clamp(min=1.0)
+            context = (embeddings * uncontrolled.unsqueeze(-1)).sum(dim=2, keepdim=True) / denom.unsqueeze(-1)
+        else:
+            context = embeddings.mean(dim=2, keepdim=True)
+
+        context = context.expand(-1, -1, self.n_agents, -1)
+        return context.reshape(-1, context.shape[-1])
 
     def _build_inputs(self, batch, t=None):
         '''if t=None, then returns inputs for all timesteps
