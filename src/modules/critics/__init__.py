@@ -11,6 +11,7 @@ from .ac_ns import ACCriticNS
 from .ippo import IPPOCritic
 from .ippo_ns import IPPOCriticNS
 from .poam import POAMCritic
+from .clam import CLAMCritic
 REGISTRY = {}
 
 REGISTRY["coma_critic"] = COMACritic
@@ -26,6 +27,6 @@ REGISTRY["ac_critic_ns"] = ACCriticNS
 REGISTRY["ippo_critic"] = IPPOCritic
 REGISTRY["ippo_critic_ns"] = IPPOCriticNS
 REGISTRY["poam_critic"] = POAMCritic
-
+REGISTRY["clam_critic"] = CLAMCritic
 
 

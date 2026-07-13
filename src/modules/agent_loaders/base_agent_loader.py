@@ -76,6 +76,14 @@ class BaseAgentLoader():
     def save_models(self, path):
         th.save(self.policy.state_dict(), "{}/agent.th".format(path))
 
+    def load_models(self, path):
+        self.policy.load_state_dict(
+            th.load(
+                "{}/agent.th".format(path),
+                map_location=lambda storage, loc: storage,
+            )
+        )
+
     def _get_input_shape(self, scheme, args):
         '''Pass args as parameter to allow greater flexibility.'''
         input_shape = scheme["obs"]["vshape"]

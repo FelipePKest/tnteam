@@ -1,0 +1,74 @@
+name: "clam"
+on_policy: True
+runner: "parallel"
+
+buffer_size: 64
+batch_size_run: 8
+batch_size: 64
+
+action_selector: "soft_policies"
+mask_before_softmax: True
+agent_output_type: "pi_logits"
+
+learner: "clam_learner"
+mac: "agent_owned_mac"
+agent: "rnn_clam"
+critic_type: "clam_critic"
+
+# Local actor/critic inputs. The CLAM encoder itself consumes only each ego
+# agent's local observation history; actions, global state, and teammate-local
+# observations are not passed to it.
+obs_agent_id: True
+obs_last_action: True
+obs_state: False
+obs_individual_obs: False
+
+# CLAM architecture (paper/reference defaults: 2 x 128 Transformer, 4 heads).
+embed_dim: 20
+clam_model_dim: 128
+clam_n_heads: 4
+clam_n_layers: 2
+clam_ff_dim: 256
+clam_dropout: 0.0
+clam_projection_hidden_dim: 128
+clam_projection_dim: 64
+
+# Asymmetric trajectory contrastive learning.
+clam_lr: 0.003
+clam_temperature: 0.5
+clam_mask_ratio: 0.3
+clam_min_crop: 8
+clam_max_crop: 48
+clam_target_tau: 0.01
+clam_update_interval: 1
+clam_grad_norm_clip: 5
+
+# PPO.
+entropy_coef: 0.05
+standardise_rewards: True
+use_gae: True
+gae_lambda: 0.95
+q_nstep: 5
+epochs: 5
+n_minibatch: 1
+eps_clip: 0.1
+lr: 0.0005
+optim_alpha: 0.99
+optim_eps: 0.00001
+use_popart: False
+clip_value_loss: False
+use_huber_loss: False
+huber_delta: 10.0
+use_adv_std: True
+use_obs_norm: True
+use_orthogonal_init: True
+
+trainable_agents_mask_actor: True
+trainable_agents_mask_critic: False
+mask_type: "team"
+
+# Used when an open training config replaces mac with open_train_mac.
+trained_agents:
+  agent_0:
+    agent_loader: "clam_train_agent_loader"
+    agent_path: ""

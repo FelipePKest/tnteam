@@ -7,6 +7,10 @@ from .actor_critic_pac_dcg_learner import PACDCGLearner
 from .maddpg_learner import MADDPGLearner
 from .ppo_learner import PPOLearner
 from .poam_learner import POAMLearner
+from .policy_repr_poam_learner import (
+    PolicyRepresentationPOAMLearner as PolicyReprPOAMLearner,
+)
+from .clam_learner import CLAMLearner
 from .classifier_learner import ClassifierLearner
 
 REGISTRY = {}
@@ -19,4 +23,6 @@ REGISTRY["ppo_learner"] = PPOLearner
 REGISTRY["pac_learner"] = PACActorCriticLearner
 REGISTRY["pac_dcg_learner"] = PACDCGLearner
 REGISTRY["poam_learner"] = POAMLearner
+REGISTRY["policy_repr_poam_learner"] = PolicyReprPOAMLearner
+REGISTRY["clam_learner"] = CLAMLearner
 REGISTRY["classifier_learner"] = ClassifierLearner

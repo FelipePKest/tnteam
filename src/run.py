@@ -122,6 +122,8 @@ def run_sequential(args, logger):
             "dtype": th.long,
             "episode_const": True,
         }
+        if getattr(args, "n_policy_types", 0) > 0:
+            scheme["policy_type"] = {"vshape": (1,), "group": "agents", "dtype": th.long}
     
     if "liam" in args.name or "poam" in args.name and not args.open_train_or_eval:
         scheme['actor_hidden_states']['vshape'] = (args.hidden_dim, 2) 

@@ -130,8 +130,7 @@ class OpenTrainMAC:
         self.trained_agent.save_models(path)
     
     def load_models(self, path):
-        # TODO check if this is correct
-        self.trained_agent.load_state_dict(th.load("{}/agent.th".format(path)))
+        self.trained_agent.load_models(path)
 
     def sample_agent_team(self): 
         '''
