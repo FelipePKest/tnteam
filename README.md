@@ -19,6 +19,34 @@ The following additions and modifications were made by us:
 - Minor modifications to agent architectures to enable fair comparisons between the newly added methods and existing methods
 - Minor modifications to the orders in which config files are loaded (values in the alg configs override default values)
 
+## CLAM learner
+
+The repository includes a PPO-based implementation of [Contrastive
+Learning-Based Agent Modeling (CLAM)](https://arxiv.org/abs/2401.00132).
+CLAM conditions each controlled agent's actor and critic on a real-time policy
+embedding computed only from that agent's local observation history. The
+original learner uses asymmetric crop-and-mask InfoNCE, while the separate
+`clam_type_supervised` learner treats episodes involving the same uncontrolled
+agent type as positives and different types as negatives. Both variants use a
+momentum-updated target encoder for PPO.
+
+Train CLAM with the same task configs used by the other algorithms:
+
+```bash
+# SMAC / open-team training
+python src/main.py --env-config=sc2 --config=open/open_train_5v6 \
+  --alg-config=sc2/clam with env_args.map_name=5m_vs_6m --seed=112358
+
+# Type-supervised CLAM: replace sc2/clam with sc2/clam_type_supervised
+
+# MPE predator-prey / open-team training
+python src/main.py --env-config=mpe --config=open/open_train_pp \
+  --alg-config=mpe/clam with env_args.pretrained_wrapper="PretrainedTag" \
+  env_args.time_limit=100 env_args.key="mpe:PredatorPrey-v0" --seed=112358
+
+# Type-supervised CLAM: replace mpe/clam with mpe/clam_type_supervised
+```
+
 # Getting Started 
 This section covers installation instructions, configuring repo-wide user variables, and downloading uncontrolled agent policies.
 

@@ -218,3 +218,47 @@ def symmetric_info_nce(first, second, temperature):
         F.cross_entropy(logits, labels)
         + F.cross_entropy(logits.transpose(0, 1), labels)
     )
+
+
+def supervised_contrastive_loss(first, second, labels, temperature):
+    """Supervised contrastive loss over two augmented trajectory views.
+
+    Every view with the same label is a positive, including views originating
+    from different episodes. Views with different labels are negatives. The
+    caller must provide at least two distinct labels so the batch contains a
+    meaningful negative pair.
+    """
+    if first.shape != second.shape:
+        raise ValueError("Supervised contrastive views must have identical shapes")
+    if first.dim() != 2:
+        raise ValueError("Supervised contrastive views must be [batch, features]")
+    labels = labels.reshape(-1).to(device=first.device, dtype=th.long)
+    if labels.size(0) != first.size(0):
+        raise ValueError("One uncontrolled-agent type label is required per episode")
+    if th.unique(labels).numel() < 2:
+        raise ValueError(
+            "Supervised contrastive loss requires at least two agent types"
+        )
+
+    features = th.cat([first, second], dim=0)
+    view_labels = labels.repeat(2)
+    logits = features @ features.transpose(0, 1) / temperature
+
+    self_mask = th.eye(
+        features.size(0), dtype=th.bool, device=features.device
+    )
+    positive_mask = view_labels[:, None].eq(view_labels[None, :]) & ~self_mask
+
+    # Exclude each representation from its own denominator and use logsumexp
+    # for numerical stability.
+    logits_without_self = logits.masked_fill(self_mask, float("-inf"))
+    log_prob = logits - th.logsumexp(logits_without_self, dim=1, keepdim=True)
+    positive_count = positive_mask.sum(dim=1)
+    if (positive_count == 0).any():
+        raise ValueError("Each contrastive anchor must have at least one positive")
+
+    mean_positive_log_prob = (
+        log_prob.masked_fill(~positive_mask, 0.0).sum(dim=1)
+        / positive_count
+    )
+    return -mean_positive_log_prob.mean()

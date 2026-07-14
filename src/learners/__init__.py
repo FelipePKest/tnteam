@@ -11,6 +11,7 @@ from .policy_repr_poam_learner import (
     PolicyRepresentationPOAMLearner as PolicyReprPOAMLearner,
 )
 from .clam_learner import CLAMLearner
+from .clam_type_supervised_learner import TypeSupervisedCLAMLearner
 from .classifier_learner import ClassifierLearner
 from .policy_repr_poam_leaner import PolicyRepresentationPOAMLearner
 
@@ -26,5 +27,6 @@ REGISTRY["pac_dcg_learner"] = PACDCGLearner
 REGISTRY["poam_learner"] = POAMLearner
 REGISTRY["policy_repr_poam_learner"] = PolicyReprPOAMLearner
 REGISTRY["clam_learner"] = CLAMLearner
+REGISTRY["clam_type_supervised_learner"] = TypeSupervisedCLAMLearner
 REGISTRY["classifier_learner"] = ClassifierLearner
 REGISTRY["policy_repr_poam_learner"] = PolicyRepresentationPOAMLearner

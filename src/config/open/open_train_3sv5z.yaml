@@ -57,31 +57,31 @@ trained_agents:
 uncntrl_agents:
   agent_ippo: # can name teams anything
     agent_loader: rnn_eval_agent_loader
-    agent_path: 3sv5z/ippo/models/ippo_baseline_seed=112358_02-29-22-51-47
+    agent_path: 3sv5z/ippo/models/ippo_baseline_seed=78590_02-29-22-51-47
     load_step: best
     n_agents_to_populate: 2
     test_mode: True
   agent_qmix:
     agent_loader: rnn_eval_agent_loader
-    agent_path: 3sv5z/qmix/models/qmix_baseline_seed=112358_02-29-22-49-07
+    agent_path: 3sv5z/qmix/models/qmix_baseline_seed=78590_02-29-22-49-07
     load_step: best
     n_agents_to_populate: 2
     test_mode: True
   agent_vdn:
     agent_loader: rnn_eval_agent_loader
-    agent_path: 3sv5z/vdn/models/vdn_baseline_seed=112358_02-29-22-49-51
+    agent_path: 3sv5z/vdn/models/vdn_baseline_seed=78590_02-29-22-49-51
     load_step: best
     n_agents_to_populate: 2
     test_mode: True
   agent_mappo:
     agent_loader: rnn_eval_agent_loader
-    agent_path: 3sv5z/mappo/models/mappo_baseline_seed=112358_02-29-22-52-21
+    agent_path: 3sv5z/mappo/models/mappo_baseline_seed=78590_02-29-22-52-21
     load_step: best
     n_agents_to_populate: 2
     test_mode: True
   agent_iql:
     agent_loader: rnn_eval_agent_loader
-    agent_path: 3sv5z/iql/models/iql_baseline_seed=112358_02-29-22-50-45
+    agent_path: 3sv5z/iql/models/iql_baseline_seed=78590_02-29-22-50-45
     load_step: best
     n_agents_to_populate: 2
     test_mode: True
