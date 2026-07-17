@@ -206,18 +206,52 @@ class CLAMProjectionHead(nn.Module):
         return F.normalize(self.network(context), dim=-1)
 
 
-def symmetric_info_nce(first, second, temperature):
-    """Symmetric InfoNCE over two aligned batches of normalized vectors."""
+def symmetric_info_nce(first, second, temperature, negatives=None):
+    """Symmetric InfoNCE with optional detached negatives from earlier batches."""
     if first.shape != second.shape:
         raise ValueError("InfoNCE views must have identical shapes")
     if first.size(0) < 2:
         raise ValueError("InfoNCE requires at least two trajectories")
-    logits = first @ second.transpose(0, 1) / temperature
+    if negatives is not None:
+        if negatives.dim() != 2 or negatives.size(1) != first.size(1):
+            raise ValueError("InfoNCE negatives must be [queue, features]")
+        negatives = negatives.detach()
+
+    first_logits = first @ second.transpose(0, 1)
+    second_logits = second @ first.transpose(0, 1)
+    if negatives is not None and negatives.size(0) > 0:
+        first_logits = th.cat([first_logits, first @ negatives.transpose(0, 1)], dim=1)
+        second_logits = th.cat(
+            [second_logits, second @ negatives.transpose(0, 1)], dim=1
+        )
+    first_logits = first_logits / temperature
+    second_logits = second_logits / temperature
     labels = th.arange(first.size(0), device=first.device)
     return 0.5 * (
-        F.cross_entropy(logits, labels)
-        + F.cross_entropy(logits.transpose(0, 1), labels)
+        F.cross_entropy(first_logits, labels)
+        + F.cross_entropy(second_logits, labels)
     )
+
+
+def momentum_info_nce(query, key, temperature, negatives=None):
+    """InfoNCE from online queries to detached momentum keys and queue entries."""
+    if query.shape != key.shape:
+        raise ValueError("InfoNCE queries and keys must have identical shapes")
+    if query.size(0) < 2:
+        raise ValueError("InfoNCE requires at least two trajectories")
+
+    key = key.detach()
+    logits = query @ key.transpose(0, 1)
+    if negatives is not None:
+        if negatives.dim() != 2 or negatives.size(1) != query.size(1):
+            raise ValueError("InfoNCE negatives must be [queue, features]")
+        if negatives.size(0) > 0:
+            logits = th.cat(
+                [logits, query @ negatives.detach().transpose(0, 1)], dim=1
+            )
+
+    labels = th.arange(query.size(0), device=query.device)
+    return F.cross_entropy(logits / temperature, labels)
 
 
 def supervised_contrastive_loss(first, second, labels, temperature):

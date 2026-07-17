@@ -6,7 +6,7 @@ from torch.optim import Adam
 
 from controllers import AgentOwnedMAC, OpenTrainMAC
 from learners.ppo_learner import PPOLearner
-from modules.clam import CLAMEncoder, CLAMProjectionHead, symmetric_info_nce
+from modules.clam import CLAMEncoder, CLAMProjectionHead, momentum_info_nce
 
 
 class CLAMLearner(PPOLearner):
@@ -26,6 +26,7 @@ class CLAMLearner(PPOLearner):
         self.clam_encoder = CLAMEncoder(obs_dim=obs_dim, args=args)
         self.target_clam_encoder = copy.deepcopy(self.clam_encoder)
         self.clam_projector = CLAMProjectionHead(args.embed_dim, args)
+        self.target_clam_projector = copy.deepcopy(self.clam_projector)
         self.clam_params = list(self.clam_encoder.parameters()) + list(
             self.clam_projector.parameters()
         )
@@ -37,7 +38,10 @@ class CLAMLearner(PPOLearner):
 
         for parameter in self.target_clam_encoder.parameters():
             parameter.requires_grad_(False)
+        for parameter in self.target_clam_projector.parameters():
+            parameter.requires_grad_(False)
         self.target_clam_encoder.eval()
+        self.target_clam_projector.eval()
 
         if isinstance(mac, AgentOwnedMAC):
             mac.agent.encoder = self.target_clam_encoder
@@ -52,6 +56,12 @@ class CLAMLearner(PPOLearner):
 
         self.clam_updates = 0
         self.clam_log_stats_t = 0
+        self.clam_queue_size = max(0, getattr(args, "clam_queue_size", 0))
+        self.clam_queue_warmup_updates = max(
+            0, getattr(args, "clam_queue_warmup_updates", 0)
+        )
+        projection_dim = getattr(args, "clam_projection_dim", 64)
+        self.clam_queue = th.empty(0, projection_dim)
 
     def train(self, batch, t_env, episode_num):
         clam_stats = None
@@ -74,9 +84,10 @@ class CLAMLearner(PPOLearner):
     def _select_ego_trajectories(self, batch):
         """Choose one local ego trajectory per episode.
 
-        Keeping one sample per episode preserves the paper's definition of
-        positives (two views of one episodic trajectory) and avoids treating
-        different agents from the same episode as contrastive negatives.
+        In open training, sample an uncontrolled teammate so the representation
+        objective models the behavior that the controlled policy must adapt to.
+        Keeping one sample per episode avoids treating agents from the same
+        episode as contrastive negatives.
         """
         observations = batch["obs"]
         batch_size = observations.size(0)
@@ -84,11 +95,14 @@ class CLAMLearner(PPOLearner):
 
         if self.args.open_train_or_eval:
             trainable = batch["trainable_agents"][:, 0, :, 0].bool().clone()
-            # There should always be at least one controlled agent. Fall back
-            # to all agents for malformed/debug batches instead of crashing.
-            missing = ~trainable.any(dim=1)
-            trainable[missing] = True
-            agent_indices = th.multinomial(trainable.float(), 1).squeeze(1)
+            candidates = ~trainable
+            # Closed/debug batches may not contain an uncontrolled agent. Fall
+            # back to controlled agents, then all agents, instead of crashing.
+            missing = ~candidates.any(dim=1)
+            candidates[missing] = trainable[missing]
+            missing = ~candidates.any(dim=1)
+            candidates[missing] = True
+            agent_indices = th.multinomial(candidates.float(), 1).squeeze(1)
         else:
             agent_indices = th.randint(
                 self.n_agents, (batch_size,), device=device
@@ -114,6 +128,26 @@ class CLAMLearner(PPOLearner):
             )
             crops.append(trajectory[start : start + crop_length])
         return th.stack(crops, dim=0)
+
+    def _aligned_crops(self, trajectories, lengths, first_length, second_length):
+        """Create two overlapping views, with the shorter nested in the longer."""
+        window_length = max(first_length, second_length)
+        windows = self._random_crop(trajectories, lengths, window_length)
+
+        def nested_view(length):
+            if length == window_length:
+                return windows
+            max_offset = window_length - length
+            offset = int(
+                th.randint(
+                    max_offset + 1,
+                    (1,),
+                    device=trajectories.device,
+                ).item()
+            )
+            return windows[:, offset : offset + length]
+
+        return nested_view(first_length), nested_view(second_length)
 
     def _strong_augmentation(self, trajectories):
         ratio = self.args.clam_mask_ratio
@@ -156,23 +190,31 @@ class CLAMLearner(PPOLearner):
         second_length = int(
             th.randint(lower, upper + 1, (1,), device=trajectories.device).item()
         )
-        strong_view = self._random_crop(
-            trajectories, lengths, first_length
-        )
-        weak_view = self._random_crop(
-            trajectories, lengths, second_length
+        strong_view, weak_view = self._aligned_crops(
+            trajectories,
+            lengths,
+            first_length,
+            second_length,
         )
         strong_view, masked_fraction = self._strong_augmentation(strong_view)
 
         self.clam_encoder.train()
         first_context = self.clam_encoder(strong_view)
-        second_context = self.clam_encoder(weak_view)
         first_projection = self.clam_projector(first_context)
-        second_projection = self.clam_projector(second_context)
-        loss = symmetric_info_nce(
+
+        with th.no_grad():
+            self.target_clam_encoder.eval()
+            self.target_clam_projector.eval()
+            second_context = self.target_clam_encoder(weak_view)
+            second_projection = self.target_clam_projector(second_context)
+
+        use_queue = self.clam_updates >= self.clam_queue_warmup_updates
+        negatives = self.clam_queue.to(first_projection.device) if use_queue else None
+        loss = momentum_info_nce(
             first_projection,
             second_projection,
             self.args.clam_temperature,
+            negatives=negatives,
         )
 
         self.clam_optimiser.zero_grad()
@@ -182,6 +224,7 @@ class CLAMLearner(PPOLearner):
         )
         self.clam_optimiser.step()
         self._momentum_update_target()
+        self._enqueue_projections(second_projection)
 
         cosine = (first_projection * second_projection).sum(dim=-1).mean()
         return {
@@ -191,7 +234,17 @@ class CLAMLearner(PPOLearner):
             "clam_strong_crop_length": first_length,
             "clam_weak_crop_length": second_length,
             "clam_masked_fraction": masked_fraction,
+            "clam_queue_count": self.clam_queue.size(0),
+            "clam_queue_used": int(use_queue and self.clam_queue.size(0) > 0),
         }
+
+    @th.no_grad()
+    def _enqueue_projections(self, keys):
+        if self.clam_queue_size == 0:
+            self.clam_queue = keys.new_empty(0, keys.size(1))
+            return
+        queued = th.cat([self.clam_queue.to(keys.device), keys], dim=0)
+        self.clam_queue = queued[-self.clam_queue_size :].detach()
 
     @th.no_grad()
     def _momentum_update_target(self):
@@ -207,13 +260,25 @@ class CLAMLearner(PPOLearner):
             self.target_clam_encoder.buffers(),
         ):
             target.copy_(online)
+        for online, target in zip(
+            self.clam_projector.parameters(),
+            self.target_clam_projector.parameters(),
+        ):
+            target.data.mul_(1.0 - tau).add_(online.data, alpha=tau)
+        for online, target in zip(
+            self.clam_projector.buffers(),
+            self.target_clam_projector.buffers(),
+        ):
+            target.copy_(online)
         self.target_clam_encoder.eval()
+        self.target_clam_projector.eval()
 
     def cuda(self):
         super().cuda()
         self.clam_encoder.cuda()
         self.target_clam_encoder.cuda()
         self.clam_projector.cuda()
+        self.target_clam_projector.cuda()
 
     def save_models(self, path):
         super().save_models(path)
@@ -227,9 +292,14 @@ class CLAMLearner(PPOLearner):
             os.path.join(path, "clam_projector.th"),
         )
         th.save(
+            self.target_clam_projector.state_dict(),
+            os.path.join(path, "clam_target_projector.th"),
+        )
+        th.save(
             self.clam_optimiser.state_dict(),
             os.path.join(path, "clam_opt.th"),
         )
+        th.save(self.clam_queue.cpu(), os.path.join(path, "clam_queue.th"))
 
     def load_models(self, path):
         super().load_models(path)
@@ -252,7 +322,20 @@ class CLAMLearner(PPOLearner):
                 map_location=map_location,
             )
         )
+        target_projector_path = os.path.join(path, "clam_target_projector.th")
+        if os.path.exists(target_projector_path):
+            self.target_clam_projector.load_state_dict(
+                th.load(target_projector_path, map_location=map_location)
+            )
+        else:
+            self.target_clam_projector.load_state_dict(
+                self.clam_projector.state_dict()
+            )
         self.clam_optimiser.load_state_dict(
             th.load(os.path.join(path, "clam_opt.th"), map_location=map_location)
         )
+        queue_path = os.path.join(path, "clam_queue.th")
+        if os.path.exists(queue_path):
+            self.clam_queue = th.load(queue_path, map_location=map_location)
         self.target_clam_encoder.eval()
+        self.target_clam_projector.eval()

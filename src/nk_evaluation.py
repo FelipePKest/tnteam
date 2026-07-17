@@ -170,6 +170,8 @@ def target_set_eval(expt_path: str,
                eval_seed: int = 394820,
                load_step_type: str = "best",
                match_training_seeds: bool = False,
+               test_nepisode: int = 128,
+               eval_batch_size_run=None,
                use_condor: bool = False,
                debug: bool=False):
     # Create the open_eval folder if it doesn't exist
@@ -237,7 +239,9 @@ def target_set_eval(expt_path: str,
                                     algo_j_path=algo_target_path, 
                                     algo_i_specific_args=eval_specific_args,
                                     algo_j_specific_args=target_specific_args,
-                                    load_step_type=load_step_type
+                                    load_step_type=load_step_type,
+                                    test_nepisode=test_nepisode,
+                                    eval_batch_size_run=eval_batch_size_run,
                                     )
                     # Check if the algorithms have already been evaluated
                     if skip_existing and is_result_written(log_folder, expt_label):

@@ -1,16 +1,16 @@
 import torch as th
 
 from learners.clam_learner import CLAMLearner
-from modules.clam import supervised_contrastive_loss
+from modules.clam import supervised_contrastive_loss, symmetric_info_nce
 
 
 class TypeSupervisedCLAMLearner(CLAMLearner):
-    """CLAM variant supervised by the sampled uncontrolled-agent type.
+    """CLAM variant combining instance- and type-level contrastive learning.
 
-    Unlike the original CLAM objective, which treats only two views from the
-    same episode as positives, this learner treats every view from episodes
-    with the same ``uncontrolled_team_idx`` as positive. Views collected
-    against different uncontrolled teams are negatives.
+    The instance objective preserves the original CLAM positive pairs (two
+    views of one episode). The supervised objective additionally treats every
+    view from episodes with the same ``uncontrolled_team_idx`` as positive and
+    views collected against different uncontrolled teams as negatives.
     """
 
     def _get_uncontrolled_team_labels(self, batch):
@@ -27,6 +27,17 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
         return labels.reshape(labels.size(0), -1)[:, 0].long()
 
     def _contrastive_update(self, batch):
+        instance_coef = getattr(self.args, "clam_instance_coef", 1.0)
+        supervised_coef = getattr(self.args, "clam_supervised_coef", 1.0)
+        if instance_coef < 0 or supervised_coef < 0:
+            raise ValueError(
+                "CLAM contrastive loss coefficients must be non-negative"
+            )
+        if instance_coef == 0 and supervised_coef == 0:
+            raise ValueError(
+                "At least one CLAM contrastive loss coefficient must be positive"
+            )
+
         trajectories, lengths = self._select_ego_trajectories(batch)
         labels = self._get_uncontrolled_team_labels(batch)
         eligible = (lengths >= 2) & (labels >= 0)
@@ -35,8 +46,11 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
         labels = labels[eligible]
 
         unique_labels, label_counts = th.unique(labels, return_counts=True)
-        if trajectories.size(0) < 2 or unique_labels.numel() < 2:
-            # A type-supervised update needs at least one cross-type negative.
+        if trajectories.size(0) < 2 or (
+            unique_labels.numel() < 2 and instance_coef == 0
+        ):
+            # Instance InfoNCE needs two trajectories. A supervised-only
+            # update also needs at least one cross-type negative.
             return {
                 "clam_update_skipped": 1.0,
                 "clam_num_types": float(unique_labels.numel()),
@@ -65,12 +79,24 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
         second_context = self.clam_encoder(weak_view)
         first_projection = self.clam_projector(first_context)
         second_projection = self.clam_projector(second_context)
-        loss = supervised_contrastive_loss(
+        temperature = self.args.clam_temperature
+        instance_loss = symmetric_info_nce(
             first_projection,
             second_projection,
-            labels,
-            self.args.clam_temperature,
+            temperature,
         )
+        if unique_labels.numel() >= 2 and supervised_coef > 0:
+            supervised_loss = supervised_contrastive_loss(
+                first_projection,
+                second_projection,
+                labels,
+                temperature,
+            )
+        else:
+            # Preserve instance-level training when a rare batch contains
+            # only one teammate type.
+            supervised_loss = instance_loss.new_zeros(())
+        loss = instance_coef * instance_loss + supervised_coef * supervised_loss
 
         self.clam_optimiser.zero_grad()
         loss.backward()
@@ -100,6 +126,8 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
 
         return {
             "clam_loss": loss.item(),
+            "clam_instance_loss": instance_loss.item(),
+            "clam_supervised_loss": supervised_loss.item(),
             "clam_grad_norm": grad_norm.item(),
             "clam_same_type_cosine": same_type_cosine.item(),
             "clam_different_type_cosine": different_type_cosine.item(),

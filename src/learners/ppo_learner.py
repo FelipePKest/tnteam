@@ -27,7 +27,8 @@ class PPOLearner:
         self.critic = critic_registry[args.critic_type](scheme, args) # ac_critic by default
 
         self.critic_params = list(self.critic.parameters())
-        self.critic_optimiser = Adam(params=self.critic_params, lr=args.lr,
+        critic_lr = getattr(args, "critic_lr", args.lr)
+        self.critic_optimiser = Adam(params=self.critic_params, lr=critic_lr,
                                      eps=self.args.optim_eps
                                      )
 
@@ -90,7 +91,9 @@ class PPOLearner:
         
         if self.value_normalizer:
             self.value_normalizer.update(target_returns)
-            denorm_old_values = self.value_normalizer.denormalize(old_values)
+            denorm_old_values = self.value_normalizer.denormalize(
+                old_values.unsqueeze(-1)
+            ).squeeze(-1)
         else:
             denorm_old_values = old_values
         advantages = (target_returns - denorm_old_values)
@@ -244,7 +247,9 @@ class PPOLearner:
 
         target_mask = self.compute_mask(batch, max_t=batch['terminated'].shape[1])
         if self.value_normalizer is not None:
-            target_vals = self.value_normalizer.denormalize(target_vals)
+            target_vals = self.value_normalizer.denormalize(
+                target_vals.unsqueeze(-1)
+            ).squeeze(-1)
 
         if self.args.use_gae:
             target_returns = self.gae_target(rewards, target_mask, target_vals)
@@ -259,7 +264,9 @@ class PPOLearner:
         Note that the value function is regressed to NORMALIZED target returns
         '''
         if self.value_normalizer is not None:
-            target_returns = self.value_normalizer.normalize(target_returns)            
+            target_returns = self.value_normalizer.normalize(
+                target_returns.unsqueeze(-1)
+            ).squeeze(-1)
 
         # shuffle batch and ts dim
         mb, max_t = curr_values.shape[:2]

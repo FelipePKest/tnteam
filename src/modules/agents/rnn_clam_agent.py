@@ -81,6 +81,11 @@ class RNNCLAMAgent(nn.Module):
         flat_hidden = hidden_state.reshape(-1, self.args.hidden_dim)
 
         x = self.base(flat_inputs)
+        # POAM applies a ReLU between its LayerNorm-ended MLP base and GRU.
+        # Keep this configurable for ablations while matching that actor path
+        # by default in the CLAM configuration.
+        if getattr(self.args, "clam_actor_post_mlp_relu", False):
+            x = F.relu(x)
         if self.args.use_rnn:
             h_out = self.rnn(x, flat_hidden)
             h_norm = self.rnn_norm(h_out)

@@ -254,6 +254,14 @@ def get_necessary_agent_args(model_path):
     args['agent'] = saved_args['agent']
     return args
 
+
+def get_eval_agent_loader(agent_name):
+    if agent_name == "rnn_poam":
+        return "poam_eval_agent_loader"
+    if agent_name == "rnn_clam":
+        return "clam_eval_agent_loader"
+    return "rnn_eval_agent_loader"
+
 def write_temp_config(env_nickname, 
                       results_path,
                       src_config_path, 
@@ -261,7 +269,9 @@ def write_temp_config(env_nickname,
                       k, num_agents, 
                       algo_i_path, algo_j_path, 
                       algo_i_specific_args, algo_j_specific_args,
-                      load_step_type="best"
+                      load_step_type="best",
+                      test_nepisode=128,
+                      eval_batch_size_run=None,
                       ):
     with open(src_config_path) as f:
         conf = yaml.load(f)
@@ -272,13 +282,15 @@ def write_temp_config(env_nickname,
     conf['log_discounted_return'] = False
 
     # do not modify, for consistency across experiments
-    conf['test_nepisode'] = 128 
+    conf['test_nepisode'] = test_nepisode
+    if eval_batch_size_run is not None:
+        conf['batch_size_run'] = eval_batch_size_run
     conf['eval_mode'] = "open"
     conf['n_uncontrolled'] = k
 
     conf['trained_agents'] = {
         'agent_0': {
-            'agent_loader': 'poam_eval_agent_loader' if algo_i_specific_args['agent'] == "rnn_poam" else "rnn_eval_agent_loader",
+            'agent_loader': get_eval_agent_loader(algo_i_specific_args['agent']),
             'agent_path': algo_i_path,
             'load_step': f'{load_step_type}',
             'n_agents_to_populate': num_agents,
@@ -286,7 +298,7 @@ def write_temp_config(env_nickname,
 
     conf['uncntrl_agents'] = {
         'agent_0': {
-            'agent_loader': 'poam_eval_agent_loader' if algo_j_specific_args["agent"] == "rnn_poam" else "rnn_eval_agent_loader",
+            'agent_loader': get_eval_agent_loader(algo_j_specific_args['agent']),
             'agent_path': algo_j_path,
             'load_step': f'{load_step_type}',
             'n_agents_to_populate': num_agents,
