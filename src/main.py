@@ -57,6 +57,7 @@ def set_arg(config_dict, params, arg_name, arg_type):
             config_dict[arg_name] = arg_type(arg_value)
             del params[_i]
             return config_dict
+    return config_dict
 
 def recursive_dict_update(primary, secondary, 
                           precedence="primary", 
@@ -115,6 +116,7 @@ if __name__ == '__main__':
 
     # overwrite seed and map name
     config_dict = set_arg(config_dict, params, "--seed", int)
+    config_dict = set_arg(config_dict, params, "--label", str)
     namelist = [config_dict['name'], config_dict['label'], f"seed={config_dict['seed']}", datetime.datetime.now().strftime("%m-%d-%H-%M-%S")]
     # namelist = [name.replace("_", "-") for name in namelist if name is not None]
     config_dict["expt_logname"]  = "_".join(namelist) 

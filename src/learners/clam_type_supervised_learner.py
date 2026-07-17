@@ -1,7 +1,7 @@
 import torch as th
 
 from learners.clam_learner import CLAMLearner
-from modules.clam import supervised_contrastive_loss
+from modules.clam import supervised_contrastive_loss, symmetric_info_nce
 
 
 class TypeSupervisedCLAMLearner(CLAMLearner):
@@ -56,8 +56,27 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
         second_length = int(
             th.randint(lower, upper + 1, (1,), device=trajectories.device).item()
         )
-        strong_view = self._random_crop(trajectories, lengths, first_length)
-        weak_view = self._random_crop(trajectories, lengths, second_length)
+        prefix_probability = getattr(
+            self.args, "clam_prefix_crop_probability", 0.0
+        )
+        if not 0.0 <= prefix_probability <= 1.0:
+            raise ValueError("clam_prefix_crop_probability must be in [0, 1]")
+        use_prefix_views = bool(
+            th.rand((), device=trajectories.device).item() < prefix_probability
+        )
+        if use_prefix_views:
+            # Online execution always encodes a trajectory prefix beginning at
+            # timestep zero. Prefix views reduce the train/deployment mismatch,
+            # while a probability below one retains random-crop invariance.
+            strong_view = trajectories[:, :first_length]
+            weak_view = trajectories[:, :second_length]
+        else:
+            strong_view = self._random_crop(
+                trajectories, lengths, first_length
+            )
+            weak_view = self._random_crop(
+                trajectories, lengths, second_length
+            )
         strong_view, masked_fraction = self._strong_augmentation(strong_view)
 
         self.clam_encoder.train()
@@ -65,12 +84,34 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
         second_context = self.clam_encoder(weak_view)
         first_projection = self.clam_projector(first_context)
         second_projection = self.clam_projector(second_context)
-        loss = supervised_contrastive_loss(
+        instance_temperature = getattr(
+            self.args,
+            "clam_instance_temperature",
+            self.args.clam_temperature,
+        )
+        supervised_temperature = getattr(
+            self.args,
+            "clam_supervised_temperature",
+            self.args.clam_temperature,
+        )
+        instance_loss = symmetric_info_nce(
+            first_projection,
+            second_projection,
+            instance_temperature,
+        )
+        supervised_loss = supervised_contrastive_loss(
             first_projection,
             second_projection,
             labels,
-            self.args.clam_temperature,
+            supervised_temperature,
         )
+        instance_coef = getattr(self.args, "clam_instance_coef", 1.0)
+        supervised_coef = getattr(self.args, "clam_supervised_coef", 1.0)
+        if instance_coef < 0 or supervised_coef < 0:
+            raise ValueError("CLAM loss coefficients must be non-negative")
+        if instance_coef == 0 and supervised_coef == 0:
+            raise ValueError("At least one CLAM loss coefficient must be positive")
+        loss = instance_coef * instance_loss + supervised_coef * supervised_loss
 
         self.clam_optimiser.zero_grad()
         loss.backward()
@@ -100,6 +141,8 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
 
         return {
             "clam_loss": loss.item(),
+            "clam_instance_loss": instance_loss.item(),
+            "clam_supervised_loss": supervised_loss.item(),
             "clam_grad_norm": grad_norm.item(),
             "clam_same_type_cosine": same_type_cosine.item(),
             "clam_different_type_cosine": different_type_cosine.item(),
@@ -109,6 +152,7 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
             "clam_strong_crop_length": first_length,
             "clam_weak_crop_length": second_length,
             "clam_masked_fraction": masked_fraction,
+            "clam_prefix_views": float(use_prefix_views),
             "clam_update_skipped": 0.0,
             "clam_num_types": float(unique_labels.numel()),
             "clam_min_episodes_per_type": float(label_counts.min().item()),

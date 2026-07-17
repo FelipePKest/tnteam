@@ -30,12 +30,18 @@ clam_dropout: 0.0
 clam_projection_hidden_dim: 128
 clam_projection_dim: 64
 
-# Same uncontrolled-team types are positives; different types are negatives.
+# Preserve episode-level information while pulling episodes from the same
+# uncontrolled-team type together and pushing different types apart.
 clam_lr: 0.003
 clam_temperature: 0.5
+clam_instance_temperature: 0.5
+clam_supervised_temperature: 0.5
+clam_instance_coef: 1.0
+clam_supervised_coef: 1.0
 clam_mask_ratio: 0.3
 clam_min_crop: 8
 clam_max_crop: 48
+clam_prefix_crop_probability: 0.0
 clam_target_tau: 0.01
 clam_update_interval: 1
 clam_grad_norm_clip: 5
