@@ -272,3 +272,12 @@ __MACOSX/
 
 *.out
 *.log
+
+mpe-pp/
+mpe-pp/*
+notebooks/
+notebooks/*
+plots/
+plots/*
+scripts/
+scripts/*

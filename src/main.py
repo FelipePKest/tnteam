@@ -117,6 +117,10 @@ if __name__ == '__main__':
     # overwrite seed and map name
     config_dict = set_arg(config_dict, params, "--seed", int)
     config_dict = set_arg(config_dict, params, "--label", str)
+    # Resolve result-path overrides before constructing the Sacred observer.
+    # A `with local_results_path=...` update is applied by Sacred only after
+    # the observer path is chosen, which can split Sacred and model artifacts.
+    config_dict = set_arg(config_dict, params, "--local_results_path", str)
     namelist = [config_dict['name'], config_dict['label'], f"seed={config_dict['seed']}", datetime.datetime.now().strftime("%m-%d-%H-%M-%S")]
     # namelist = [name.replace("_", "-") for name in namelist if name is not None]
     config_dict["expt_logname"]  = "_".join(namelist) 

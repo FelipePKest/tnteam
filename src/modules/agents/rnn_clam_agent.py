@@ -76,6 +76,8 @@ class RNNCLAMAgent(nn.Module):
                     trajectories, padding_mask=padding_mask
                 ).view(batch_size, 1, n_agents, -1)
 
+        if getattr(self.args, "clam_zero_context", False):
+            contexts = th.zeros_like(contexts)
         inputs = th.cat([inputs, contexts.detach()], dim=-1)
         flat_inputs = inputs.reshape(-1, self.input_size + self.args.embed_dim)
         flat_hidden = hidden_state.reshape(-1, self.args.hidden_dim)

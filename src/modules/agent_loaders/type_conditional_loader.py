@@ -299,7 +299,9 @@ class TypeConditionalAgentLoader:
 
     def set_encoder(self, encoder):
         for expert in self.experts.values():
-            if hasattr(expert, "policy"):
+            if hasattr(expert, "policy") and not getattr(
+                expert, "preserve_policy_encoder", False
+            ):
                 expert.policy.encoder = encoder
 
     def _update_accuracy(self, batch, preds_list):

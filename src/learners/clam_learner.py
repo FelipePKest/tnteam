@@ -26,6 +26,30 @@ class CLAMLearner(PPOLearner):
         self.clam_encoder = CLAMEncoder(obs_dim=obs_dim, args=args)
         self.target_clam_encoder = copy.deepcopy(self.clam_encoder)
         self.clam_projector = CLAMProjectionHead(args.embed_dim, args)
+        init_path = getattr(args, "clam_init_encoder_path", "")
+        if init_path:
+            if os.path.isfile(init_path):
+                encoder_path = init_path
+                target_path = os.path.join(
+                    os.path.dirname(init_path), "clam_target_encoder.th"
+                )
+            else:
+                encoder_path = os.path.join(init_path, "clam_encoder.th")
+                target_path = os.path.join(
+                    init_path, "clam_target_encoder.th"
+                )
+            map_location = lambda storage, loc: storage
+            self.clam_encoder.load_state_dict(
+                th.load(encoder_path, map_location=map_location)
+            )
+            if os.path.exists(target_path):
+                self.target_clam_encoder.load_state_dict(
+                    th.load(target_path, map_location=map_location)
+                )
+            else:
+                self.target_clam_encoder.load_state_dict(
+                    self.clam_encoder.state_dict()
+                )
         self.clam_params = list(self.clam_encoder.parameters()) + list(
             self.clam_projector.parameters()
         )
@@ -56,7 +80,11 @@ class CLAMLearner(PPOLearner):
     def train(self, batch, t_env, episode_num):
         clam_stats = None
         update_interval = getattr(self.args, "clam_update_interval", 1)
-        if self.clam_updates % update_interval == 0:
+        disable_updates = (
+            getattr(self.args, "clam_zero_context", False)
+            or getattr(self.args, "clam_freeze_encoder", False)
+        )
+        if not disable_updates and self.clam_updates % update_interval == 0:
             clam_stats = self._contrastive_update(batch)
         self.clam_updates += 1
 
