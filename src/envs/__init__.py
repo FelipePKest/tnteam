@@ -3,15 +3,15 @@ import sys
 import os
 import numpy as np
 import mpe
-import matrixgames
-from smac.env import MultiAgentEnv, StarCraft2Env
+# import matrixgames
+# from smac.env import MultiAgentEnv, StarCraft2Env
 from .gymma import GymmaWrapper
 
-def env_fn(env, **kwargs) -> MultiAgentEnv:
+def env_fn(env, **kwargs):
     return env(**kwargs)
 
 REGISTRY = {}
-REGISTRY["sc2"] = partial(env_fn, env=StarCraft2Env)
+# REGISTRY["sc2"] = partial(env_fn, env=StarCraft2Env)
 if sys.platform == "linux":
     os.environ.setdefault(
         "SC2PATH", os.path.join(os.getcwd(), "3rdparty", "StarCraftII")
