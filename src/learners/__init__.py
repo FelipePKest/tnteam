@@ -14,6 +14,7 @@ from .clam_learner import CLAMLearner
 from .clam_type_supervised_learner import TypeSupervisedCLAMLearner
 from .classifier_learner import ClassifierLearner
 from .policy_repr_poam_leaner import PolicyRepresentationPOAMLearner
+from .matwm_learner import MATWMLearner
 
 REGISTRY = {}
 REGISTRY["q_learner"] = QLearner
@@ -30,3 +31,4 @@ REGISTRY["clam_learner"] = CLAMLearner
 REGISTRY["clam_type_supervised_learner"] = TypeSupervisedCLAMLearner
 REGISTRY["classifier_learner"] = ClassifierLearner
 REGISTRY["policy_repr_poam_learner"] = PolicyRepresentationPOAMLearner
+REGISTRY["matwm_learner"] = MATWMLearner

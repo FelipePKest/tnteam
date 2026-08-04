@@ -106,6 +106,33 @@ To run a particular algorithm on a particular task, the following changes to the
 
 # Instructions to Run NAHT Experiments
 
+## MATWM
+
+The repository includes a vector-observation implementation of the Multi-Agent
+Transformer World Model (MATWM). It supports both standard cooperative training
+and this codebase's open-team setting. In open-team runs, the world model learns
+from every agent trajectory while actor/critic updates only use controlled-agent
+contexts.
+
+Train MATWM in the open StarCraft setting:
+
+```bash
+python src/main.py --env-config=sc2 --config=open/open_train_5v6 \
+  --alg-config=sc2/matwm with env_args.map_name=5m_vs_6m --seed=112358
+```
+
+Train MATWM in open Predator-Prey:
+
+```bash
+python src/main.py --config=open/open_train_pp --alg-config=mpe/matwm \
+  --env-config=mpe with env_args.pretrained_wrapper="PretrainedTag" \
+  env_args.time_limit=100 env_args.key="mpe:PredatorPrey-v0" --seed=112358
+```
+
+The paper hyperparameters are in `src/config/algs/{sc2,mpe}/matwm.yaml`.
+Because EPyMARL stores whole episodes, the paper's 50,000-transition replay
+capacity is converted to an equivalent episode capacity at runtime.
+
 *TLDR*: 
 To train POAM on the StarCraft `5v6` task, run the following commmand: 
 

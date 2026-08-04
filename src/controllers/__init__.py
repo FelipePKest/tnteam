@@ -6,6 +6,7 @@ from .maddpg_controller import MADDPGMAC
 from .agent_owned_controller import AgentOwnedMAC
 from .open_eval_controller import OpenEvalMAC
 from .open_train_controller import OpenTrainMAC
+from .matwm_controller import MATWMMAC
 
 REGISTRY["basic_mac_old"] = BasicMACOld
 REGISTRY["basic_mac"] = BasicMAC
@@ -13,3 +14,4 @@ REGISTRY["maddpg_mac"] = MADDPGMAC
 REGISTRY["agent_owned_mac"] = AgentOwnedMAC
 REGISTRY["open_eval_mac"] = OpenEvalMAC
 REGISTRY["open_train_mac"] = OpenTrainMAC
+REGISTRY["matwm_mac"] = MATWMMAC

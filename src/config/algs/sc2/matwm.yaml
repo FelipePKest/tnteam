@@ -1,0 +1,55 @@
+# Multi-Agent Transformer World Model (Deihim et al., 2025)
+name: "matwm"
+learner: "matwm_learner"
+mac: "matwm_mac" # open-team configs retain open_train_mac via non_overridable
+on_policy: False
+
+trained_agents:
+  agent_0:
+    agent_loader: "matwm_train_agent_loader"
+    agent_path: ""
+
+batch_size: 16
+buffer_size: 512 # recalculated from capacity_steps by run.py
+matwm_replay_capacity_steps: 50000
+matwm_replay_decay: 0.9998
+matwm_prefill_steps: 1000
+
+# OpenTrainMAC shares this recurrent-state field with legacy teammate policies.
+# MATWM's transformer state is separate (`matwm_hidden_dim`).
+hidden_dim: 64
+matwm_hidden_dim: 512
+matwm_transformer_layers: 2
+matwm_attention_heads: 8
+matwm_ff_dim: 2048
+matwm_max_seq_length: 64
+matwm_n_latents: 32
+matwm_n_categories: 32
+matwm_encoder_hidden_dim: 512
+matwm_encoder_layers: 3
+matwm_agent_hidden_dim: 512
+matwm_teammate_layers: 2
+matwm_dropout: 0.0
+matwm_reward_bins: 255
+matwm_reward_low: -20.0
+matwm_reward_high: 20.0
+
+matwm_world_lr: 0.00003
+matwm_agent_lr: 0.0003
+matwm_world_grad_clip: 1000.0
+matwm_agent_grad_clip: 100.0
+matwm_dynamics_weight: 0.5
+matwm_representation_weight: 0.1
+matwm_free_bits: 1.0
+matwm_context_length: 8
+matwm_imagination_horizon: null # 16/12/8, scaled by number of agents
+matwm_agent_batch_size: null # 512/768/1024, scaled by number of agents
+matwm_lambda: 0.95
+matwm_entropy_coef: 0.0003
+matwm_ema_decay: 0.98
+
+agent_output_type: "pi_logits"
+action_selector: "soft_policies"
+obs_agent_id: False
+obs_team_composition: False
+optim_eps: 0.00001

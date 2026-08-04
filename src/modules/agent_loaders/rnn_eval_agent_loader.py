@@ -45,7 +45,7 @@ class RNNEvalAgentLoader(BaseAgentLoader):
         self.batch_size_run = self.args.batch_size_run
         self.device = self.args.device
         try:
-            self.policy.cuda(self.device)
+            self.policy.to(self.device)
         except Exception as e:
             print(e)
             print("Device is: ", self.device)

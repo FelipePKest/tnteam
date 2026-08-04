@@ -3,6 +3,7 @@ import json
 import pprint
 import time
 import threading
+import math
 import torch as th
 from types import SimpleNamespace as SN
 from utils.logging import Logger
@@ -131,10 +132,18 @@ def run_sequential(args, logger):
     groups = {"agents": args.n_agents}
     preprocess = {"actions": ("actions_onehot", [OneHot(out_dim=args.n_actions)])}
 
+    buffer_size = args.buffer_size
+    if args.learner == "matwm_learner":
+        capacity_steps = getattr(args, "matwm_replay_capacity_steps", None)
+        if capacity_steps is not None:
+            buffer_size = max(
+                args.batch_size,
+                int(math.ceil(capacity_steps / float(env_info["episode_limit"])))
+            )
     buffer = ReplayBuffer(
         scheme,
         groups,
-        args.buffer_size,
+        buffer_size,
         env_info["episode_limit"] + 1,
         preprocess=preprocess,
         device="cpu" if args.buffer_cpu_only else args.device,
@@ -142,7 +151,8 @@ def run_sequential(args, logger):
 
     # Setup multiagent controller here
     mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
-    mac.cuda()
+    if args.use_cuda:
+        mac.cuda()
 
     # Give runner the scheme
     runner.setup(scheme=scheme, groups=groups, preprocess=preprocess, mac=mac)
@@ -186,7 +196,16 @@ def run_sequential(args, logger):
         episode_batch, _ = runner.run(test_mode=False) # batch_size_run eps collected
         buffer.insert_episode_batch(episode_batch)
         if buffer.can_sample(args.batch_size): # when batch_size eps collected
-            episode_sample = buffer.sample(args.batch_size)
+            recency_decay = (
+                getattr(args, "matwm_replay_decay", None)
+                if args.learner == "matwm_learner" else None
+            )
+            if recency_decay is not None:
+                # Replay entries are episodes; preserve the paper's per-step decay.
+                recency_decay = recency_decay ** env_info["episode_limit"]
+            episode_sample = buffer.sample(
+                args.batch_size, recency_decay=recency_decay
+            )
 
             # Truncate batch to only filled timesteps
             max_ep_t = episode_sample.max_t_filled()

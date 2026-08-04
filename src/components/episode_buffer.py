@@ -236,13 +236,24 @@ class ReplayBuffer(EpisodeBatch):
     def can_sample(self, batch_size):
         return self.episodes_in_buffer >= batch_size
 
-    def sample(self, batch_size):
+    def sample(self, batch_size, recency_decay=None):
         assert self.can_sample(batch_size)
         if self.episodes_in_buffer == batch_size:
             return self[:batch_size]
         else:
-            # Uniform sampling only atm
-            ep_ids = np.random.choice(self.episodes_in_buffer, batch_size, replace=False)
+            probabilities = None
+            if recency_decay is not None:
+                indices = np.arange(self.episodes_in_buffer)
+                if self.episodes_in_buffer < self.buffer_size:
+                    ages = self.episodes_in_buffer - 1 - indices
+                else:
+                    # buffer_index always points at the next (oldest) slot.
+                    ages = (self.buffer_index - 1 - indices) % self.buffer_size
+                probabilities = np.power(float(recency_decay), ages.astype(np.float64))
+                probabilities /= probabilities.sum()
+            ep_ids = np.random.choice(
+                self.episodes_in_buffer, batch_size, replace=False, p=probabilities
+            )
             return self[ep_ids]
     
     def clear(self):
@@ -259,4 +270,3 @@ class ReplayBuffer(EpisodeBatch):
                                                                         self.buffer_size,
                                                                         self.scheme.keys(),
                                                                         self.groups.keys())
-
