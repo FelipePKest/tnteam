@@ -26,9 +26,10 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
         labels = batch["uncontrolled_team_idx"]
         return labels.reshape(labels.size(0), -1)[:, 0].long()
 
-    def _contrastive_update(self, batch):
-        trajectories, lengths = self._select_ego_trajectories(batch)
-        labels = self._get_uncontrolled_team_labels(batch)
+    def _get_clam_labels(self, batch):
+        return self._get_uncontrolled_team_labels(batch)
+
+    def _contrastive_update(self, trajectories, lengths, labels):
         eligible = (lengths >= 2) & (labels >= 0)
         trajectories = trajectories[eligible]
         lengths = lengths[eligible]
@@ -138,6 +139,23 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
             )
             same_type_cosine = similarities[same_type].mean()
             different_type_cosine = similarities[different_type].mean()
+            raw_context = th.cat([first_context, second_context], dim=0)
+            raw_labels = labels.repeat(2)
+            raw_similarity = raw_context @ raw_context.transpose(0, 1)
+            raw_similarity.fill_diagonal_(float("-inf"))
+            nearest = raw_similarity.argmax(dim=1)
+            type_knn_accuracy = (
+                raw_labels[nearest] == raw_labels
+            ).float().mean()
+            centered = raw_context - raw_context.mean(dim=0, keepdim=True)
+            singular_values = th.linalg.svdvals(centered)
+            probabilities = singular_values / singular_values.sum().clamp_min(
+                1e-12
+            )
+            effective_rank = th.exp(
+                -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+            )
+            representation_std = raw_context.std(dim=0).mean()
 
         return {
             "clam_loss": loss.item(),
@@ -149,6 +167,9 @@ class TypeSupervisedCLAMLearner(CLAMLearner):
             "clam_type_cosine_margin": (
                 same_type_cosine - different_type_cosine
             ).item(),
+            "clam_type_knn_accuracy": type_knn_accuracy.item(),
+            "clam_representation_std": representation_std.item(),
+            "clam_effective_rank": effective_rank.item(),
             "clam_strong_crop_length": first_length,
             "clam_weak_crop_length": second_length,
             "clam_masked_fraction": masked_fraction,

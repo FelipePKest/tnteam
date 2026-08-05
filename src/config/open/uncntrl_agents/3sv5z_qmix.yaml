@@ -58,7 +58,7 @@ trained_agents:
 uncntrl_agents:
   agent_qmix:
     agent_loader: rnn_eval_agent_loader
-    agent_path: 3sv5z/qmix/models/qmix_baseline_seed=112358_02-29-22-49-07
+    agent_path: 3sv5z/qmix/models/qmix_baseline_seed=1285842_02-29-22-49-07
     load_step: best
     n_agents_to_populate: 2
     test_mode: True

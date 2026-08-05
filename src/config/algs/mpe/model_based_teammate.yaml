@@ -1,18 +1,16 @@
-name: "clam"
+name: "model_based_teammate"
 on_policy: True
 runner: "parallel"
 
 buffer_size: 64
 batch_size_run: 8
 batch_size: 64
-clam_buffer_capacity: 10000
-clam_batch_size: 512
 
 action_selector: "soft_policies"
 mask_before_softmax: True
 agent_output_type: "pi_logits"
 
-learner: "clam_learner"
+learner: "model_based_teammate_learner"
 mac: "agent_owned_mac"
 agent: "rnn_clam"
 critic_type: "clam_critic"
@@ -23,23 +21,17 @@ obs_state: False
 obs_individual_obs: False
 obs_team_composition: False
 
-embed_dim: 20
-clam_model_dim: 128
-clam_n_heads: 4
-clam_n_layers: 2
-clam_ff_dim: 256
-clam_dropout: 0.0
-clam_projection_hidden_dim: 128
-clam_projection_dim: 64
-
-clam_lr: 0.003
-clam_temperature: 0.5
-clam_mask_ratio: 0.3
-clam_min_crop: 8
-clam_max_crop: 48
-clam_target_tau: 0.01
-clam_update_interval: 1
-clam_grad_norm_clip: 5
+embed_dim: 32
+teammate_model_hidden_dim: 128
+teammate_planning_horizon: 3
+teammate_planning_discount: 0.95
+teammate_model_lr: 0.0003
+teammate_target_tau: 0.01
+teammate_action_loss_coef: 1.0
+teammate_dynamics_loss_coef: 1.0
+teammate_reward_loss_coef: 0.1
+teammate_obs_loss_coef: 0.25
+teammate_model_grad_norm_clip: 5.0
 
 entropy_coef: 0.05
 standardise_rewards: True

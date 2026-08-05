@@ -56,7 +56,9 @@ class RNNCLAMAgent(nn.Module):
             valid = ep_batch["filled"].squeeze(-1)
 
         with th.no_grad():
-            if t is None:
+            if hasattr(ep_batch, "clam_contexts"):
+                contexts = ep_batch.clam_contexts[:, ts]
+            elif t is None:
                 contexts = self.encoder.forward_prefixes(
                     ep_batch["obs"], valid=valid
                 )

@@ -161,6 +161,8 @@ class EpisodeBatch:
             ret_max_t = self._get_num_items(item[1], self.max_seq_length)
 
             ret = EpisodeBatch(self.scheme, self.groups, ret_bs, ret_max_t, data=new_data, device=self.device)
+            if hasattr(self, "clam_contexts"):
+                ret.clam_contexts = self.clam_contexts[item]
             return ret
 
     def _get_num_items(self, indexing_item, max_size):
@@ -259,4 +261,3 @@ class ReplayBuffer(EpisodeBatch):
                                                                         self.buffer_size,
                                                                         self.scheme.keys(),
                                                                         self.groups.keys())
-

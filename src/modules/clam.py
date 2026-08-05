@@ -136,14 +136,8 @@ class CLAMEncoder(nn.Module):
             padding_mask[all_padding, 0] = False
 
         features = self.position(self.input_projection(trajectory))
-        max_t = trajectory.size(1)
-        causal_mask = th.triu(
-            th.ones(max_t, max_t, dtype=th.bool, device=trajectory.device),
-            diagonal=1,
-        )
         features = self.transformer(
             features,
-            mask=causal_mask,
             src_key_padding_mask=padding_mask,
         )
         context = self.pooling(features, padding_mask=padding_mask)
@@ -169,20 +163,21 @@ class CLAMEncoder(nn.Module):
             all_padding = padding_mask.all(dim=1)
             padding_mask[all_padding, 0] = False
 
-        features = self.position(self.input_projection(trajectories))
-        causal_mask = th.triu(
-            th.ones(max_t, max_t, dtype=th.bool, device=observations.device),
-            diagonal=1,
-        )
-        features = self.transformer(
-            features,
-            mask=causal_mask,
-            src_key_padding_mask=padding_mask,
-        )
-        contexts = self.pooling.forward_prefixes(
-            features, padding_mask=padding_mask
-        )
-        contexts = F.normalize(contexts, dim=-1)
+        # Standard self-attention may use every observation in the currently
+        # available prefix, as in CLAM. Compute each prefix independently so
+        # no timestep can see observations that had not happened yet.
+        prefix_contexts = []
+        for end in range(1, max_t + 1):
+            prefix_padding = (
+                None if padding_mask is None else padding_mask[:, :end]
+            )
+            prefix_contexts.append(
+                self.forward(
+                    trajectories[:, :end],
+                    padding_mask=prefix_padding,
+                )
+            )
+        contexts = th.stack(prefix_contexts, dim=1)
         return contexts.view(batch_size, n_agents, max_t, self.embed_dim).permute(
             0, 2, 1, 3
         )

@@ -5,6 +5,8 @@ runner: "parallel"
 buffer_size: 64
 batch_size_run: 8
 batch_size: 64
+clam_buffer_capacity: 10000
+clam_batch_size: 512
 
 action_selector: "soft_policies"
 mask_before_softmax: True
@@ -66,7 +68,7 @@ use_obs_norm: True
 use_orthogonal_init: True
 
 trainable_agents_mask_actor: True
-trainable_agents_mask_critic: False
+trainable_agents_mask_critic: True
 mask_type: "team"
 
 trained_agents:

@@ -8,6 +8,7 @@ from .type_conditional_loader import TypeConditionalAgentLoader
 from .type_matched_train_loader import TypeMatchedTrainLoader
 from .clam_train_agent_loader import CLAMTrainAgentLoader
 from .clam_eval_agent_loader import CLAMEvalAgentLoader
+from .model_based_teammate_eval_agent_loader import ModelBasedTeammateEvalAgentLoader
 
 
 REGISTRY["rnn_eval_agent_loader"] = RNNEvalAgentLoader
@@ -18,3 +19,4 @@ REGISTRY["type_conditional_loader"] = TypeConditionalAgentLoader
 REGISTRY["type_matched_train_loader"] = TypeMatchedTrainLoader
 REGISTRY["clam_train_agent_loader"] = CLAMTrainAgentLoader
 REGISTRY["clam_eval_agent_loader"] = CLAMEvalAgentLoader
+REGISTRY["model_based_teammate_eval_agent_loader"] = ModelBasedTeammateEvalAgentLoader

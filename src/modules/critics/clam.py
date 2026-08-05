@@ -70,7 +70,10 @@ class CLAMCritic(nn.Module):
         with th.no_grad():
             if not build_inputs:
                 raise ValueError("CLAMCritic requires an EpisodeBatch to build context")
-            if t is None:
+            ts = slice(None) if t is None else slice(t, t + 1)
+            if hasattr(batch, "clam_contexts"):
+                contexts = batch.clam_contexts[:, ts]
+            elif t is None:
                 contexts = self.encoder.forward_prefixes(batch["obs"], valid=valid)
             else:
                 observations = batch["obs"][:, : t + 1]

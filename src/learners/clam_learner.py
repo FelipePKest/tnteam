@@ -76,28 +76,139 @@ class CLAMLearner(PPOLearner):
 
         self.clam_updates = 0
         self.clam_log_stats_t = 0
+        self.clam_buffer_capacity = getattr(
+            args, "clam_buffer_capacity", 10000
+        )
+        self.clam_batch_size = getattr(args, "clam_batch_size", 512)
+        if self.clam_buffer_capacity < self.clam_batch_size:
+            raise ValueError(
+                "clam_buffer_capacity must be at least clam_batch_size"
+            )
+        max_length = getattr(args, "episode_limit", 200) + 1
+        self.clam_trajectory_buffer = th.zeros(
+            self.clam_buffer_capacity,
+            max_length,
+            obs_dim,
+            dtype=th.float32,
+            device="cpu",
+        )
+        self.clam_length_buffer = th.zeros(
+            self.clam_buffer_capacity, dtype=th.long, device="cpu"
+        )
+        self.clam_label_buffer = th.full(
+            (self.clam_buffer_capacity,), -1, dtype=th.long, device="cpu"
+        )
+        self.clam_buffer_index = 0
+        self.clam_buffer_count = 0
 
     def train(self, batch, t_env, episode_num):
+        # PPO must be updated before the EMA context encoder changes. Otherwise
+        # its recomputed "old" log-probabilities do not correspond to the
+        # context used to collect the rollout.
+        self._cache_target_contexts(batch)
+        super().train(batch, t_env, episode_num)
+        self._store_clam_batch(batch)
+
         clam_stats = None
         update_interval = getattr(self.args, "clam_update_interval", 1)
         disable_updates = (
             getattr(self.args, "clam_zero_context", False)
             or getattr(self.args, "clam_freeze_encoder", False)
         )
-        if not disable_updates and self.clam_updates % update_interval == 0:
-            clam_stats = self._contrastive_update(batch)
+        can_sample = self.clam_buffer_count >= self.clam_batch_size
+        if (
+            not disable_updates
+            and can_sample
+            and self.clam_updates % update_interval == 0
+        ):
+            trajectories, lengths, labels = self._sample_clam_batch()
+            clam_stats = self._contrastive_update(
+                trajectories, lengths, labels
+            )
         self.clam_updates += 1
-
-        # PPO sees only the detached EMA representation.
-        super().train(batch, t_env, episode_num)
 
         if clam_stats is not None and (
             t_env - self.clam_log_stats_t >= self.args.learner_log_interval
             or self.clam_log_stats_t == 0
         ):
+            clam_stats["clam_buffer_size"] = float(self.clam_buffer_count)
             for key, value in clam_stats.items():
                 self.logger.log_stat(key, value, t_env)
             self.clam_log_stats_t = t_env
+
+    @th.no_grad()
+    def _cache_target_contexts(self, batch):
+        if getattr(self.args, "clam_zero_context", False):
+            batch.clam_contexts = batch["obs"].new_zeros(
+                *batch["obs"].shape[:-1], self.args.embed_dim
+            )
+            return
+        valid = batch["filled"].squeeze(-1)
+        contexts = self.target_clam_encoder.forward_prefixes(
+            batch["obs"], valid=valid
+        )
+        batch.clam_contexts = contexts.detach()
+
+    def _get_clam_labels(self, batch):
+        return th.full(
+            (batch.batch_size,), -1, dtype=th.long, device=batch.device
+        )
+
+    @th.no_grad()
+    def _store_clam_batch(self, batch):
+        trajectories, lengths = self._select_ego_trajectories(batch)
+        labels = self._get_clam_labels(batch)
+        trajectories = trajectories.detach().to("cpu")
+        lengths = lengths.detach().to("cpu")
+        labels = labels.detach().to("cpu")
+
+        batch_size = trajectories.size(0)
+        if batch_size >= self.clam_buffer_capacity:
+            trajectories = trajectories[-self.clam_buffer_capacity :]
+            lengths = lengths[-self.clam_buffer_capacity :]
+            labels = labels[-self.clam_buffer_capacity :]
+            batch_size = self.clam_buffer_capacity
+
+        first = min(
+            batch_size, self.clam_buffer_capacity - self.clam_buffer_index
+        )
+        second = batch_size - first
+        slices = (
+            (slice(self.clam_buffer_index, self.clam_buffer_index + first),
+             slice(0, first)),
+        )
+        if second:
+            slices += ((slice(0, second), slice(first, batch_size)),)
+
+        for destination, source in slices:
+            self.clam_trajectory_buffer[destination].zero_()
+            sequence_length = min(
+                trajectories.size(1),
+                self.clam_trajectory_buffer.size(1),
+            )
+            self.clam_trajectory_buffer[destination, :sequence_length].copy_(
+                trajectories[source, :sequence_length]
+            )
+            self.clam_length_buffer[destination].copy_(
+                lengths[source].clamp(max=sequence_length)
+            )
+            self.clam_label_buffer[destination].copy_(labels[source])
+
+        self.clam_buffer_index = (
+            self.clam_buffer_index + batch_size
+        ) % self.clam_buffer_capacity
+        self.clam_buffer_count = min(
+            self.clam_buffer_capacity, self.clam_buffer_count + batch_size
+        )
+
+    def _sample_clam_batch(self):
+        indices = th.randperm(self.clam_buffer_count)[: self.clam_batch_size]
+        device = self.args.device
+        return (
+            self.clam_trajectory_buffer[indices].to(device),
+            self.clam_length_buffer[indices].to(device),
+            self.clam_label_buffer[indices].to(device),
+        )
 
     def _select_ego_trajectories(self, batch):
         """Choose one local ego trajectory per episode.
@@ -160,8 +271,7 @@ class CLAMLearner(PPOLearner):
             augmented[row, indices] = 0
         return augmented, n_masked / trajectories.size(1)
 
-    def _contrastive_update(self, batch):
-        trajectories, lengths = self._select_ego_trajectories(batch)
+    def _contrastive_update(self, trajectories, lengths, labels=None):
         eligible = lengths >= 2
         trajectories = trajectories[eligible]
         lengths = lengths[eligible]
@@ -212,10 +322,31 @@ class CLAMLearner(PPOLearner):
         self._momentum_update_target()
 
         cosine = (first_projection * second_projection).sum(dim=-1).mean()
+        cross_similarity = first_projection @ second_projection.transpose(0, 1)
+        negative_mask = ~th.eye(
+            cross_similarity.size(0),
+            dtype=th.bool,
+            device=cross_similarity.device,
+        )
+        negative_cosine = cross_similarity[negative_mask].mean()
+        representation_std = th.cat(
+            [first_context, second_context], dim=0
+        ).std(dim=0).mean()
+        centered = th.cat([first_context, second_context], dim=0)
+        centered = centered - centered.mean(dim=0, keepdim=True)
+        singular_values = th.linalg.svdvals(centered)
+        probabilities = singular_values / singular_values.sum().clamp_min(1e-12)
+        effective_rank = th.exp(
+            -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+        )
         return {
             "clam_loss": loss.item(),
             "clam_grad_norm": grad_norm.item(),
             "clam_positive_cosine": cosine.item(),
+            "clam_negative_cosine": negative_cosine.item(),
+            "clam_cosine_margin": (cosine - negative_cosine).item(),
+            "clam_representation_std": representation_std.item(),
+            "clam_effective_rank": effective_rank.item(),
             "clam_strong_crop_length": first_length,
             "clam_weak_crop_length": second_length,
             "clam_masked_fraction": masked_fraction,

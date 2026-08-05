@@ -13,6 +13,7 @@ from .policy_repr_poam_learner import (
 from .clam_learner import CLAMLearner
 from .clam_type_supervised_learner import TypeSupervisedCLAMLearner
 from .classifier_learner import ClassifierLearner
+from .model_based_teammate_learner import ModelBasedTeammateLearner
 from .policy_repr_poam_leaner import PolicyRepresentationPOAMLearner
 
 REGISTRY = {}
@@ -29,4 +30,5 @@ REGISTRY["policy_repr_poam_learner"] = PolicyReprPOAMLearner
 REGISTRY["clam_learner"] = CLAMLearner
 REGISTRY["clam_type_supervised_learner"] = TypeSupervisedCLAMLearner
 REGISTRY["classifier_learner"] = ClassifierLearner
+REGISTRY["model_based_teammate_learner"] = ModelBasedTeammateLearner
 REGISTRY["policy_repr_poam_learner"] = PolicyRepresentationPOAMLearner
