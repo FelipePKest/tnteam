@@ -272,3 +272,9 @@ __MACOSX/
 
 *.out
 *.log
+
+*.json
+tb_logs/
+tb_logs/*
+events.out.*
+*.pdf

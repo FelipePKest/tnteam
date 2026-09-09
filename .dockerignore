@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+**/__pycache__
+**/*.pyc
+**/.ipynb_checkpoints
+3rdparty/StarCraftII
+uncntrl_agents
+naht_results
+3sv5z
+plots
+notebooks
+*.log
+*.pdf
+*.png
+*.ipynb

@@ -1,0 +1,62 @@
+version: "2.3"
+
+x-training-common: &training-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: tnteam-marie:cu117
+  working_dir: /workspace/tnteam
+  runtime: nvidia
+  shm_size: "8gb"
+  init: true
+  environment:
+    SC2PATH: /workspace/tnteam/3rdparty/StarCraftII
+    MARIE_REFERENCE_ROOT: /workspace/MARIE
+    PYTHONUNBUFFERED: "1"
+    PYTORCH_CUDA_ALLOC_CONF: max_split_size_mb:128
+    WANDB_MODE: disabled
+  volumes:
+    - ${SC2_PATH:-./3rdparty/StarCraftII}:/workspace/tnteam/3rdparty/StarCraftII:ro
+    - ${MARIE_PATH:-../MARIE}:/workspace/MARIE:ro
+    - ${UNCONTROLLED_PATH:-./uncntrl_agents}:/workspace/tnteam/uncntrl_agents:ro
+    - ./naht_results:/workspace/tnteam/naht_results
+    - ./3sv5z:/workspace/tnteam/3sv5z
+
+services:
+  marie:
+    <<: *training-common
+    command:
+      - python
+      - train_marie_naht_3sv5z.py
+      - --steps
+      - "500000"
+      - --eval-episodes
+      - "8"
+      - --seed
+      - "112358"
+      - --batch-size-run
+      - "1"
+      - --uncontrolled-seed
+      - "112358"
+      - --marie-reference-root
+      - /workspace/MARIE
+
+  poam:
+    <<: *training-common
+    command:
+      - python
+      - train_poam_marie_utd_3sv5z.py
+      - --steps
+      - "500000"
+      - --eval-episodes
+      - "8"
+      - --seed
+      - "112358"
+      - --batch-size-run
+      - "1"
+      - --uncontrolled-seed
+      - "112358"
+      - --updates-per-step
+      - "0.77"
+      - --checkpoint-interval
+      - "10000"
