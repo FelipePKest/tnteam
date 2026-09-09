@@ -1,0 +1,111 @@
+# MARIE: Multi-Agent auto-Regressive Imagination for Efficient learning
+name: "marie"
+learner: "marie_learner"
+mac: "marie_mac"
+on_policy: False
+
+batch_size: 30
+buffer_size: 512
+matwm_replay_capacity_steps: 250000
+matwm_replay_decay: null
+matwm_prefill_steps: 1000
+marie_min_replay_steps: 1000
+marie_new_samples_per_update: 100
+marie_sample_temperature: "inf"
+matwm_updates_per_collect: 1
+matwm_updates_per_env_step: null
+matwm_sequence_replay: True
+marie_grouped_contexts: True
+marie_original_procedure: True
+matwm_interleaved_updates: False
+matwm_joint_action_dynamics: False
+matwm_predicted_teammate_ratio: 0.0
+matwm_soft_teammate_actions: False
+matwm_real_critic_coef: 0.0
+matwm_reward_ensemble_size: 1
+matwm_uncertainty_penalty: 0.0
+
+# Compatibility fields used by the shared replay/imagination training harness.
+hidden_dim: 64
+matwm_hidden_dim: 256
+matwm_transformer_layers: 10
+matwm_attention_heads: 4
+matwm_ff_dim: 1024
+matwm_max_seq_length: 15
+matwm_n_latents: 16
+matwm_n_categories: 512
+marie_token_embed_dim: 128
+marie_tokenizer_hidden_dim: 256
+marie_stack_obs: 5
+marie_tokenizer_lr: 0.0003
+marie_tokenizer_batch_size: 256
+marie_tokenizer_weight_decay: 0.0
+marie_tokenizer_grad_clip: 10.0
+marie_tokenizer_entropy_coef: 0.001
+marie_vq_ema_decay: 0.8
+marie_vq_commitment_weight: 10.0
+# Upstream runs 200 tokenizer and WM steps per update event, starts the world
+# model after 10 events, then starts five actor/critic rounds after 20.
+marie_tokenizer_epochs: 200
+marie_world_epochs: 200
+marie_policy_epochs: 5
+marie_imagined_ppo: True
+marie_ppo_epochs: 5
+marie_ppo_clip: 0.2
+marie_value_coef: 0.5
+marie_world_warmup_events: 9
+marie_policy_warmup_events: 19
+marie_terminal_loss_weight: 2.0
+marie_validation_horizon: 5
+matwm_encoder_hidden_dim: 256
+matwm_encoder_layers: 3
+matwm_agent_hidden_dim: 256
+matwm_teammate_layers: 2
+matwm_dropout: 0.1
+matwm_reward_bins: 255
+matwm_reward_regression: True
+matwm_reward_low: -20.0
+matwm_reward_high: 20.0
+matwm_reward_zero_epsilon: 0.000001
+matwm_reward_prediction_threshold: 0.1
+matwm_reward_event_threshold: 1.0
+
+marie_perceiver_layers: 2
+marie_perceiver_heads: 8
+marie_perceiver_latent_heads: 8
+marie_perceiver_dropout: 0.1
+marie_critic_heads: 8
+# Official MARIE recommendation for SMAC 3s_vs_5z.
+marie_policy_temperature: 1.0
+
+matwm_world_lr: 0.0001
+marie_world_weight_decay: 0.01
+matwm_agent_lr: 0.0005
+matwm_ppo_separate_critic: True
+matwm_ppo_critic_lr: 0.0005
+matwm_world_grad_clip: 10.0
+matwm_agent_grad_clip: 100.0
+matwm_dynamics_weight: 0.5
+matwm_representation_weight: 0.1
+matwm_free_bits: 1.0
+# Four previous observations plus the current one form the five-frame policy
+# stack used by upstream rollout_policy_trans.
+matwm_context_length: 5
+matwm_imagination_horizon: 15
+matwm_agent_batch_size: 600
+matwm_lambda: 0.95
+matwm_entropy_coef: 0.001
+matwm_ema_decay: 0.98
+marie_target_update_interval: 20
+matwm_ema_bootstrap: False
+matwm_critic_ema_coef: 0.0
+
+agent_output_type: "pi_logits"
+action_selector: "soft_policies"
+obs_agent_id: False
+obs_team_composition: False
+optim_eps: 0.00001
+marie_actor_critic_eps: 0.00000001
+marie_actor_critic_weight_decay: 0.00001
+test_interval: 10000
+test_nepisode: 8

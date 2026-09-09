@@ -75,7 +75,7 @@ class EpisodeRunner:
         self.t = 0
 
     @th.no_grad()
-    def run(self, test_mode=False):
+    def run(self, test_mode=False, step_callback=None):
         self.reset()
 
         terminated = False
@@ -117,6 +117,10 @@ class EpisodeRunner:
             self.batch.update(post_transition_data, ts=self.t)
 
             self.t += 1
+            if not test_mode and step_callback is not None:
+                self.t_env += 1
+                with th.enable_grad():
+                    step_callback(1)
 
         last_data = {
             "state": [self.env.get_state()],
@@ -146,7 +150,7 @@ class EpisodeRunner:
             print("Number of episodes collected: ", cur_stats["n_episodes"])
             print(f"Return so far:  {round(np.mean(cur_returns), 3)} +/- {round(np.std(cur_returns), 3)}" )
 
-        if not test_mode:
+        if not test_mode and step_callback is None:
             self.t_env += self.t
 
         cur_returns.append(episode_return)
@@ -197,6 +201,10 @@ class EpisodeRunner:
         return self.batch, mean_test_return
 
     def _log(self, returns, stats, prefix):
+        if prefix == "test_" and stats.get("n_episodes", 0):
+            self.last_test_battle_won = (
+                stats.get("battle_won", 0) / stats["n_episodes"]
+            )
         self.logger.log_stat(prefix + "return_mean", np.mean(returns), self.t_env)
         self.logger.log_stat(prefix + "return_std", np.std(returns), self.t_env)
         returns.clear()

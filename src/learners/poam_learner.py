@@ -1,4 +1,5 @@
 # code heavily adapted from original ePymarl implementation, based on the MAPPO implementation.
+import math
 import os
 import numpy as np
 from components.episode_buffer import EpisodeBatch
@@ -70,6 +71,8 @@ class POAMLearner:
 
         self.log_stats_t = 0
         self.log_extra_stats_t = 0
+        self.nonfinite_recoveries = 0
+        self.ppo_epoch_scale = 1.0
         device = "cuda" if args.use_cuda else "cpu"
         if self.args.standardise_rewards:
             self.rew_ms = RunningMeanStd(shape=(1,), device=device)
@@ -100,12 +103,69 @@ class POAMLearner:
         # mask shape: (bs, ep_len, n_agents)
         return mask
 
+    def _snapshot_train_state(self):
+        params = list(dict.fromkeys(
+            self.agent_params + self.critic_params + self.ed_params
+        ))
+        return params, [param.detach().clone() for param in params]
+
+    def _restore_train_state(self, snapshot):
+        params, values = snapshot
+        with th.no_grad():
+            for param, value in zip(params, values):
+                param.copy_(value)
+        # A non-finite update can contaminate Adam's running moments. Reset
+        # them rather than carrying NaNs into the next otherwise-valid batch.
+        for optimiser in (
+            self.agent_optimiser,
+            self.critic_optimiser,
+            self.encoder_decoder_optimiser,
+        ):
+            optimiser.state.clear()
+
+    @staticmethod
+    def _ensure_finite(tensor, label):
+        if not th.isfinite(tensor).all():
+            raise FloatingPointError("Non-finite values in {}".format(label))
+
+    def _checked_optimizer_step(self, loss, optimiser, params, max_norm, label):
+        self._ensure_finite(loss, label + " loss")
+        optimiser.zero_grad()
+        loss.backward()
+        for param in params:
+            if param.grad is not None:
+                self._ensure_finite(param.grad, label + " gradient")
+        grad_norm = th.nn.utils.clip_grad_norm_(params, max_norm)
+        self._ensure_finite(grad_norm, label + " gradient norm")
+        optimiser.step()
+        for param in params:
+            self._ensure_finite(param, label + " parameter")
+        return grad_norm
+
     def train(self, batch: EpisodeBatch, t_env: int, episode_num: int):
         # Get the relevant quantities
         rewards = batch["reward"][:, :-1]
         actions = batch["actions"][:, :-1]
         # batch[terminated] has shape (bs, ep_len + 1, 1)
         max_t = batch['terminated'].shape[1] - 1
+        ppo_epochs = self.args.epochs
+        target_updates_per_step = getattr(
+            self.args, "poam_actor_updates_per_env_step", None
+        )
+        if target_updates_per_step is not None:
+            collected_transitions = batch["filled"][:, :max_t].sum().item()
+            # Every epoch makes one actor update per minibatch. Scale epochs
+            # with the actual (unpadded) batch length so variable episode
+            # lengths do not change the requested update-to-data ratio.
+            ppo_epochs = max(
+                1,
+                int(math.ceil(
+                    float(target_updates_per_step)
+                    * collected_transitions
+                    / self.args.n_minibatch
+                )),
+            )
+        ppo_epochs = max(1, int(math.ceil(ppo_epochs * self.ppo_epoch_scale)))
         actor_mask = self.compute_mask(batch, max_t=max_t)
         critic_mask = actor_mask.detach().clone()
         ed_mask = actor_mask.detach().clone()
@@ -184,39 +244,55 @@ class POAMLearner:
             print(f"Switching from updating ED only to updating all. t_env is {t_env}")
 
             # perform PPO update
-            for _ in range(self.args.epochs):
+            train_snapshot = self._snapshot_train_state()
+            recovered_nonfinite = False
+            for _ in range(ppo_epochs):
                 # generate randomized minibatches across batch dim only (preserve temporal structure)
                 mb_rand = th.randperm(batch.batch_size).numpy() 
                 mb_size = batch.batch_size // self.args.n_minibatch
                 sampler = [np.array(mb_rand[i * mb_size:(i + 1) * mb_size]) for i in range(self.args.n_minibatch)]
                 old_ed_hidden, old_critic_hidden = old_critic_hidden_states
 
-                for indices in sampler:             
-                    log_pi_taken, entropy = self.actor_forward_all(self.mac, batch[indices], actions[indices])
-                    curr_v = self.critic_forward_all(self.critic, 
-                                                    batch[indices], 
-                                                    hidden_states=(old_ed_hidden[indices], old_critic_hidden[indices]))
-                    curr_v = curr_v[:, :-1].squeeze(3)
-                    ##################################
-                    actor_train_stats = self.actor_update(log_pi_taken=log_pi_taken, 
-                                                        entropy=entropy, 
-                                                        advantages=advantages[indices],
-                                                        old_log_prob_taken=old_log_prob_taken[indices], 
-                                                        mask=actor_mask[indices],
-                                                        actor_train_stats=actor_train_stats,
-                                                        )
-                    critic_train_stats = self.critic_update(curr_values=curr_v,
-                                                            old_values=old_values[indices], 
-                                                            target_returns=target_returns[indices],
-                                                            mask=critic_mask[indices], 
-                                                            critic_train_stats=critic_train_stats
-                                                            )
-                    ###################################
-                    encoder_decoder_train_stats = self.encoder_decoder_update(batch=batch[indices],
-                                                                              mask=ed_mask[indices],
-                                                                              encoder_decoder_train_stats=encoder_decoder_train_stats,
-                                                                              t_env=t_env
-                                                                              )
+                for indices in sampler:
+                    try:
+                        log_pi_taken, entropy = self.actor_forward_all(self.mac, batch[indices], actions[indices])
+                        curr_v = self.critic_forward_all(self.critic,
+                                                        batch[indices],
+                                                        hidden_states=(old_ed_hidden[indices], old_critic_hidden[indices]))
+                        self._ensure_finite(curr_v, "critic output")
+                        curr_v = curr_v[:, :-1].squeeze(3)
+                        actor_train_stats = self.actor_update(log_pi_taken=log_pi_taken,
+                                                            entropy=entropy,
+                                                            advantages=advantages[indices],
+                                                            old_log_prob_taken=old_log_prob_taken[indices],
+                                                            mask=actor_mask[indices],
+                                                            actor_train_stats=actor_train_stats)
+                        critic_train_stats = self.critic_update(curr_values=curr_v,
+                                                                old_values=old_values[indices],
+                                                                target_returns=target_returns[indices],
+                                                                mask=critic_mask[indices],
+                                                                critic_train_stats=critic_train_stats)
+                        encoder_decoder_train_stats = self.encoder_decoder_update(
+                            batch=batch[indices], mask=ed_mask[indices],
+                            encoder_decoder_train_stats=encoder_decoder_train_stats,
+                            t_env=t_env)
+                    except FloatingPointError as error:
+                        self._restore_train_state(train_snapshot)
+                        self.nonfinite_recoveries += 1
+                        self.ppo_epoch_scale = max(0.05, self.ppo_epoch_scale * 0.5)
+                        recovered_nonfinite = True
+                        print(
+                            "POAM numerical recovery at t_env={}: {}. "
+                            "Restored batch-start parameters; PPO epoch scale is now {:.4f}."
+                            .format(t_env, error, self.ppo_epoch_scale),
+                            flush=True,
+                        )
+                        break
+                if recovered_nonfinite:
+                    for stats in (actor_train_stats, critic_train_stats, encoder_decoder_train_stats):
+                        for values in stats.values():
+                            values.clear()
+                    break
 
         # logging
         if t_env - self.log_stats_t >= self.args.learner_log_interval or self.log_stats_t == 0:
@@ -232,6 +308,9 @@ class POAMLearner:
 
             self.logger.log_stat("old_values_mean", old_values.mean().item(), t_env)
             self.logger.log_stat("advantage_mean", advantages.mean().item(), t_env)
+            self.logger.log_stat("poam_ppo_epochs", ppo_epochs, t_env)
+            self.logger.log_stat("poam_ppo_epoch_scale", self.ppo_epoch_scale, t_env)
+            self.logger.log_stat("poam_nonfinite_recoveries", self.nonfinite_recoveries, t_env)
             self.log_stats_t = t_env
 
     def reshape_batches(self, batch_list, bs, max_t):
@@ -300,10 +379,10 @@ class POAMLearner:
                 act_loss = (-log_prob * act_mask_mb).sum() / act_mask_mb.sum()
                 loss = (obs_loss + act_loss)
                 
-                self.encoder_decoder_optimiser.zero_grad()
-                loss.backward()
-                grad_norm = th.nn.utils.clip_grad_norm_(self.ed_params, self.args.ed_grad_norm_clip)
-                self.encoder_decoder_optimiser.step()
+                grad_norm = self._checked_optimizer_step(
+                    loss, self.encoder_decoder_optimiser, self.ed_params,
+                    self.args.ed_grad_norm_clip, "encoder-decoder"
+                )
 
                 ##########################
                 encoder_decoder_train_stats['ed_obs_loss'].append(obs_loss.item())
@@ -356,10 +435,10 @@ class POAMLearner:
 
         ###################################
         # Optimise agents
-        self.agent_optimiser.zero_grad()
-        actor_loss.backward()
-        grad_norm = th.nn.utils.clip_grad_norm_(self.agent_params, self.args.grad_norm_clip)
-        self.agent_optimiser.step()
+        grad_norm = self._checked_optimizer_step(
+            actor_loss, self.agent_optimiser, self.agent_params,
+            self.args.grad_norm_clip, "actor"
+        )
 
         actor_train_stats["actor_loss"].append(actor_loss.item())
         actor_train_stats["actor_grad_norm"].append(grad_norm.item())
@@ -395,6 +474,7 @@ class POAMLearner:
         '''Compute log probs and entropy using given hidden states 
         for all timesteps in a single forward pass.'''
         agent_outs, _ = mac.forward(batch, t=None)
+        self._ensure_finite(agent_outs, "actor logits")
         
         log_probs_all, entropy_all = mac.action_selector.eval_action(agent_inputs=agent_outs[:, :-1], 
                                                                      actions=actions.squeeze(-1)
@@ -457,10 +537,10 @@ class POAMLearner:
         
         loss = (loss * mask).sum() / mask.sum()
 
-        self.critic_optimiser.zero_grad()
-        (loss * 0.5).backward() # TODO: factor out 0.5 as value loss coef
-        grad_norm = th.nn.utils.clip_grad_norm_(self.critic_params, self.args.grad_norm_clip)
-        self.critic_optimiser.step()
+        grad_norm = self._checked_optimizer_step(
+            loss * 0.5, self.critic_optimiser, self.critic_params,
+            self.args.grad_norm_clip, "critic"
+        )
 
         critic_train_stats["critic_loss"].append(loss.item())
         critic_train_stats["critic_grad_norm"].append(grad_norm.item())

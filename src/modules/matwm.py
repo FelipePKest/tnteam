@@ -92,10 +92,37 @@ class MATWMWorldModel(nn.Module):
         )
         self.dynamics = nn.Linear(self.hidden_dim, self.latent_dim)
 
-        self.reward_bins = getattr(args, "matwm_reward_bins", 255)
+        self.reward_regression = getattr(args, "matwm_reward_regression", False)
+        self.reward_bins = (
+            1 if self.reward_regression
+            else getattr(args, "matwm_reward_bins", 255)
+        )
         self.reward_low = getattr(args, "matwm_reward_low", -20.0)
         self.reward_high = getattr(args, "matwm_reward_high", 20.0)
-        self.reward = nn.Linear(self.hidden_dim, self.reward_bins)
+        self.use_reward_model = getattr(args, "matwm_use_reward_model", True)
+        self.reward_uses_mlp = getattr(args, "matwm_reward_mlp", True)
+        reward_hidden = getattr(args, "matwm_reward_hidden_dim", self.hidden_dim)
+        reward_input_dim = (
+            self.hidden_dim + self.latent_dim
+            if self.reward_uses_mlp else self.hidden_dim
+        )
+
+        def reward_head():
+            if not self.reward_uses_mlp:
+                return nn.Linear(reward_input_dim, self.reward_bins)
+            return nn.Sequential(
+                nn.LayerNorm(reward_input_dim),
+                nn.Linear(reward_input_dim, reward_hidden), nn.ELU(),
+                nn.Linear(reward_hidden, self.reward_bins),
+            )
+
+        self.reward = reward_head() if self.use_reward_model else None
+        ensemble_size = getattr(args, "matwm_reward_ensemble_size", 1)
+        self.reward_ensemble = nn.ModuleList([
+            reward_head()
+            for _ in range(max(0, ensemble_size - 1))
+        ] if self.use_reward_model else [
+        ])
         self.continuation = nn.Linear(self.hidden_dim, 1)
         self.action_mask = nn.Linear(self.latent_dim, n_actions)
 
@@ -143,6 +170,16 @@ class MATWMWorldModel(nn.Module):
         indices = focal_ids.long() * self.n_actions + actions
         return out.scatter_(-1, indices.unsqueeze(-1), 1.0)
 
+    def joint_action(self, actions):
+        """Encode one action per agent into fixed agent-specific blocks."""
+        if actions.dim() >= 4 and actions.shape[-2:] == (
+            self.n_agents, self.n_actions
+        ):
+            return actions.to(self.position.dtype).flatten(-2)
+        actions = actions.long()
+        one_hot = F.one_hot(actions, self.n_actions).to(self.position.dtype)
+        return one_hot.flatten(-2)
+
     def dynamics_sequence(self, latent, actions, focal_ids):
         """Return h_t for tokens (z_t, a_t), with a causal attention mask."""
         length = latent.shape[1]
@@ -150,8 +187,14 @@ class MATWMWorldModel(nn.Module):
             latent = latent[:, -self.max_seq_length:]
             actions = actions[:, -self.max_seq_length:]
             length = self.max_seq_length
-        ids = focal_ids[:, None].expand(-1, length)
-        action = self.scaled_action(actions, ids)
+        is_soft_joint = actions.dim() >= 4 and actions.shape[-2:] == (
+            self.n_agents, self.n_actions
+        )
+        if actions.shape[-1] == self.n_agents or is_soft_joint:
+            action = self.joint_action(actions)
+        else:
+            ids = focal_ids[:, None].expand(-1, length)
+            action = self.scaled_action(actions, ids)
         token = self.action_mixer(th.cat((latent.flatten(-2), action), dim=-1))
         token = token + self.position[:, :length]
         return self.sequence_model(token, mask=_causal_mask(length, token.device))
@@ -170,17 +213,30 @@ class MATWMWorldModel(nn.Module):
             *hidden.shape[:-1], self.n_agents, self.n_actions
         )
 
-    def prediction_heads(self, hidden):
+    def prediction_heads(self, hidden, latent):
         dynamics_logits = self.dynamics(hidden).view(
             *hidden.shape[:-1], self.n_latents, self.n_categories
         )
+        reward_logits = []
+        if self.use_reward_model:
+            reward_features = (
+                th.cat((hidden, latent.flatten(-2)), dim=-1)
+                if self.reward_uses_mlp else hidden
+            )
+            reward_logits.append(self.reward(reward_features))
+            reward_logits.extend(
+                head(reward_features) for head in self.reward_ensemble
+            )
         return {
             "dynamics_logits": dynamics_logits,
-            "reward_logits": self.reward(hidden),
+            "reward_logits": reward_logits[0] if reward_logits else None,
+            "reward_ensemble_logits": reward_logits,
             "continuation_logits": self.continuation(hidden),
         }
 
     def reward_value(self, reward_logits):
+        if self.reward_regression:
+            return reward_logits
         bins = th.linspace(
             self.reward_low, self.reward_high, self.reward_bins,
             device=reward_logits.device, dtype=reward_logits.dtype,
@@ -232,9 +288,14 @@ class MATWMPolicy(nn.Module):
         self.n_agents = n_agents
         self.n_actions = n_actions
         self.world_model = MATWMWorldModel(obs_dim, n_agents, n_actions, args)
+        self.use_raw_obs_skip = getattr(args, "matwm_policy_obs_skip", False)
+        self.policy_obs_norm = (
+            nn.LayerNorm(obs_dim) if self.use_raw_obs_skip else None
+        )
         state_dim = (
             self.world_model.latent_dim + self.world_model.hidden_dim
             + n_agents * n_actions
+            + (obs_dim if self.use_raw_obs_skip else 0)
         )
         agent_hidden = getattr(args, "matwm_agent_hidden_dim", 512)
         self.actors = nn.ModuleList([
@@ -273,23 +334,61 @@ class MATWMPolicy(nn.Module):
         modules = self.ema_critics if ema else self.critics
         return self.agent_forward(modules, state, focal_ids)
 
-    def build_state(self, latent, hidden, teammate_logits, focal_ids):
+    def build_state(
+        self, latent, hidden, teammate_logits, focal_ids, observation=None
+    ):
         # Zero the focal agent's slot: only predicted non-focal actions are used.
         teammate_logits = teammate_logits.clone()
         rows = th.arange(focal_ids.shape[0], device=focal_ids.device)
         teammate_logits[rows, focal_ids] = 0.0
-        return th.cat((
+        features = [
             latent.flatten(-2), hidden, teammate_logits.flatten(-2)
-        ), dim=-1)
+        ]
+        if self.use_raw_obs_skip:
+            if observation is None:
+                observation = self.world_model.decode(latent)
+            features.append(self.policy_obs_norm(observation))
+        return th.cat(features, dim=-1)
+
+    def predicted_joint_actions(self, latent, focal_ids, focal_actions):
+        logits = self.world_model.teammate_logits(latent)
+        use_soft = getattr(self.args, "matwm_soft_teammate_actions", False)
+        joint = logits.softmax(-1) if use_soft else logits.argmax(-1)
+        # teammate_logits truncates histories to the transformer's context window.
+        # Align focal actions to the same suffix before replacing their slots.
+        focal_actions = focal_actions[:, -joint.shape[1]:]
+        rows = th.arange(joint.shape[0], device=joint.device)[:, None]
+        times = th.arange(joint.shape[1], device=joint.device)[None, :]
+        if use_soft:
+            focal = F.one_hot(
+                focal_actions.squeeze(-1).long(), self.n_actions
+            ).to(joint.dtype)
+            joint[rows, times, focal_ids[:, None]] = focal
+        else:
+            joint[rows, times, focal_ids[:, None]] = focal_actions.squeeze(-1)
+        return joint
 
     def real_policy(self, batch, t, agent_indices, test_mode=False):
         """Policy logits/actions from the real local history at environment step t."""
+        state, hidden, bsz, count, focal = self.real_state(
+            batch, t, agent_indices, test_mode
+        )
+        logits = self.actor_logits(state, focal).view(bsz, count, self.n_actions)
+        return logits, hidden.view(bsz, count, self.hidden_dim)
+
+    def real_state(self, batch, t, agent_indices, test_mode=False):
+        """Build detached policy features from a real local trajectory prefix."""
         ts = t + 1
         obs = batch["obs"][:, :ts, agent_indices]
         bsz, length, count, _ = obs.shape
         obs = obs.permute(0, 2, 1, 3).reshape(bsz * count, length, -1)
         focal = th.tensor(agent_indices, device=obs.device).repeat(bsz)
-        latent, _ = self.world_model.encode(obs, sample=not test_mode)
+        deterministic = getattr(
+            self.args, "matwm_deterministic_policy_latent", False
+        )
+        latent, _ = self.world_model.encode(
+            obs, sample=not (test_mode or deterministic)
+        )
 
         if t == 0:
             hidden = obs.new_zeros(bsz * count, self.hidden_dim)
@@ -298,14 +397,21 @@ class MATWMPolicy(nn.Module):
             previous_actions = previous_actions.permute(0, 2, 1, 3).reshape(
                 bsz * count, t, 1
             )
+            dynamics_actions = previous_actions
+            if getattr(self.args, "matwm_joint_action_dynamics", False):
+                dynamics_actions = self.predicted_joint_actions(
+                    latent[:, :-1], focal, previous_actions
+                )
             hidden = self.world_model.dynamics_sequence(
-                latent[:, :-1], previous_actions, focal
+                latent[:, :-1], dynamics_actions, focal
             )[:, -1]
 
         teammate = self.world_model.teammate_logits(latent)[:, -1]
-        state = self.build_state(latent[:, -1], hidden, teammate, focal)
-        logits = self.actor_logits(state, focal).view(bsz, count, self.n_actions)
-        return logits, hidden.view(bsz, count, self.hidden_dim)
+        state = self.build_state(
+            latent[:, -1], hidden, teammate, focal,
+            obs if getattr(self.args, "marie_stack_obs", 0) else obs[:, -1],
+        ).detach()
+        return state, hidden, bsz, count, focal
 
     @th.no_grad()
     def update_ema(self, decay):

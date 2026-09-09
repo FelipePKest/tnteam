@@ -24,6 +24,8 @@ use_tensorboard: True # Log results to tensorboard
 save_model: True # Save the models to disk
 save_model_interval: 2000000 # Save models after this many timesteps
 checkpoint_path: "" # Load a checkpoint from this path
+load_step: "last" # Checkpoint subdirectory: last, best, or a numeric timestep
+resume_t_env_from_checkpoint: false # Continue the environment-step counter when resuming training
 render: False # Render the environment when evaluating (only when evaluate == True)
 
 # --- Default learning hyperparameters: doesn't matter for eval only settings ---

@@ -215,9 +215,22 @@ class ReplayBuffer(EpisodeBatch):
         self.buffer_size = buffer_size  # same as self.batch_size but more explicit
         self.buffer_index = 0
         self.episodes_in_buffer = 0
+        self.marie_sample_visits = {
+            "tokenizer": th.zeros(
+                buffer_size, max_seq_length, dtype=th.long, device="cpu"
+            ),
+            "model": th.zeros(
+                buffer_size, max_seq_length, dtype=th.long, device="cpu"
+            ),
+        }
 
     def insert_episode_batch(self, ep_batch):
         if self.buffer_index + ep_batch.batch_size <= self.buffer_size:
+            inserted = slice(
+                self.buffer_index, self.buffer_index + ep_batch.batch_size
+            )
+            for visits in self.marie_sample_visits.values():
+                visits[inserted].zero_()
             self.update(ep_batch.data.transition_data,
                         slice(self.buffer_index, self.buffer_index + ep_batch.batch_size),
                         slice(0, ep_batch.max_seq_length),
@@ -232,6 +245,129 @@ class ReplayBuffer(EpisodeBatch):
             buffer_left = self.buffer_size - self.buffer_index
             self.insert_episode_batch(ep_batch[0:buffer_left, :])
             self.insert_episode_batch(ep_batch[buffer_left:, :])
+
+    def marie_transition_count(self):
+        return sum(
+            max(0, int(self.data.transition_data["filled"][episode].sum()) - 1)
+            for episode in range(self.episodes_in_buffer)
+        )
+
+    def _marie_candidates(self, sequence_length):
+        candidates = []
+        for episode in range(self.episodes_in_buffer):
+            filled = int(
+                self.data.transition_data["filled"][episode].sum().item()
+            )
+            # A sequence with L transitions requires L+1 observations.
+            last_start = filled - sequence_length - 1
+            for start in range(max(0, last_start + 1)):
+                candidates.append((episode, start))
+        return candidates
+
+    def can_sample_marie(self, batch_size, sequence_length):
+        return len(self._marie_candidates(sequence_length)) >= batch_size
+
+    def sample_marie(
+        self, batch_size, sequence_length, mode="model", temperature="inf"
+    ):
+        """Visit-balanced transition sampling used by canonical MARIE.
+
+        Sampling is without replacement. Visit counts are maintained
+        independently for tokenizer and world-model draws and reset whenever
+        an episode slot is overwritten.
+        """
+        if mode == "policy":
+            return self._sample_marie_policy(
+                batch_size, sequence_length + 1
+            )
+        if mode not in self.marie_sample_visits:
+            raise ValueError("Unknown MARIE replay mode: {}".format(mode))
+        candidates = self._marie_candidates(sequence_length)
+        if len(candidates) < batch_size:
+            raise ValueError(
+                "Not enough MARIE transitions: {} available, {} requested".format(
+                    len(candidates), batch_size
+                )
+            )
+        visits = None
+        if mode == "policy":
+            # The upstream episode dataset draws actor contexts uniformly and
+            # does not share tokenizer/world-model visit counters.
+            probabilities = None
+        else:
+            visits = np.asarray([
+                int(self.marie_sample_visits[mode][episode, start])
+                for episode, start in candidates
+            ], dtype=np.float64)
+        if visits is not None and (
+            temperature == "inf" or temperature == float("inf")
+        ):
+            if visits.sum() == 0:
+                probabilities = np.full(len(visits), 1.0 / len(visits))
+            else:
+                probabilities = 1.0 - visits / visits.sum()
+                probabilities /= probabilities.sum()
+        elif visits is not None:
+            logits = -visits / float(temperature)
+            logits -= logits.max()
+            probabilities = np.exp(logits)
+            probabilities /= probabilities.sum()
+        selected = np.random.choice(
+            len(candidates), batch_size, replace=False, p=probabilities
+        )
+        result_scheme = {
+            key: value for key, value in self.scheme.items() if key != "filled"
+        }
+        result = EpisodeBatch(
+            result_scheme, self.groups, batch_size, sequence_length + 1,
+            preprocess=None, device=self.device,
+        )
+        for output, candidate_index in enumerate(selected):
+            episode, start = candidates[candidate_index]
+            stop = start + sequence_length + 1
+            for key, value in self.data.transition_data.items():
+                result.data.transition_data[key][output] = value[
+                    episode, start:stop
+                ]
+            for key, value in self.data.episode_data.items():
+                result.data.episode_data[key][output] = value[episode]
+            if mode != "policy":
+                self.marie_sample_visits[mode][episode, start] += 1
+        return result
+
+    def _sample_marie_policy(self, batch_size, observation_length):
+        """Match MultiAgentEpisodesDataset endpoint sampling and left padding."""
+        if self.episodes_in_buffer == 0:
+            raise ValueError("Cannot sample MARIE policy contexts from empty replay")
+        result_scheme = {
+            key: value for key, value in self.scheme.items() if key != "filled"
+        }
+        result = EpisodeBatch(
+            result_scheme, self.groups, batch_size, observation_length,
+            preprocess=None, device=self.device,
+        )
+        # Upstream uses random.choices: episodes are uniform with replacement.
+        episodes = np.random.choice(
+            self.episodes_in_buffer, batch_size, replace=True
+        )
+        for output, episode in enumerate(episodes):
+            filled = int(
+                self.data.transition_data["filled"][episode].sum().item()
+            )
+            stop = np.random.randint(1, filled + 1)
+            start = stop - observation_length
+            source_start = max(0, start)
+            destination_start = source_start - start
+            copied = stop - source_start
+            destination = slice(destination_start, destination_start + copied)
+            source = slice(source_start, stop)
+            for key, value in self.data.transition_data.items():
+                result.data.transition_data[key][output, destination] = value[
+                    episode, source
+                ]
+            for key, value in self.data.episode_data.items():
+                result.data.episode_data[key][output] = value[episode]
+        return result
 
     def can_sample(self, batch_size):
         return self.episodes_in_buffer >= batch_size
@@ -255,6 +391,72 @@ class ReplayBuffer(EpisodeBatch):
                 self.episodes_in_buffer, batch_size, replace=False, p=probabilities
             )
             return self[ep_ids]
+
+    def sample_sequences(self, batch_size, sequence_length, recency_decay=None):
+        """Sample non-overlapping transition chunks with transition-age weighting."""
+        candidates = []
+        weights = []
+        for ep_id in range(self.episodes_in_buffer):
+            filled = int(self.data.transition_data["filled"][ep_id].sum().item())
+            transitions = max(0, filled - 1)
+            if transitions == 0:
+                continue
+            if self.episodes_in_buffer < self.buffer_size:
+                episode_age = self.episodes_in_buffer - 1 - ep_id
+            else:
+                episode_age = (self.buffer_index - 1 - ep_id) % self.buffer_size
+            for start in range(0, transitions, sequence_length):
+                stop = min(start + sequence_length, transitions)
+                candidates.append((ep_id, start, stop))
+                age = episode_age * self.max_seq_length + transitions - stop
+                weights.append(
+                    1.0 if recency_decay is None else float(recency_decay) ** age
+                )
+
+        if len(candidates) < batch_size:
+            raise ValueError(
+                "Not enough replay sequences: {} available, {} requested".format(
+                    len(candidates), batch_size
+                )
+            )
+        probabilities = np.asarray(weights, dtype=np.float64)
+        probabilities /= probabilities.sum()
+        selected = np.random.choice(
+            len(candidates), batch_size, replace=False, p=probabilities
+        )
+        result_scheme = {
+            key: value for key, value in self.scheme.items() if key != "filled"
+        }
+        result = EpisodeBatch(
+            result_scheme,
+            self.groups,
+            batch_size,
+            sequence_length + 1,
+            preprocess=None,
+            device=self.device,
+        )
+        for out_id, candidate_id in enumerate(selected):
+            ep_id, start, stop = candidates[candidate_id]
+            count = stop - start + 1
+            for key, value in self.data.transition_data.items():
+                result.data.transition_data[key][out_id, :count] = value[
+                    ep_id, start:stop + 1
+                ]
+            if stop == transitions:
+                result.data.transition_data["terminated"][
+                    out_id, stop - start - 1
+                ] = 1
+            for key, value in self.data.episode_data.items():
+                result.data.episode_data[key][out_id] = value[ep_id]
+        return result
+
+    def can_sample_sequences(self, batch_size, sequence_length):
+        available = 0
+        for ep_id in range(self.episodes_in_buffer):
+            filled = int(self.data.transition_data["filled"][ep_id].sum().item())
+            transitions = max(0, filled - 1)
+            available += int(np.ceil(transitions / float(sequence_length)))
+        return available >= batch_size
     
     def clear(self):
         '''Clear the replay buffer'''
@@ -264,6 +466,8 @@ class ReplayBuffer(EpisodeBatch):
             v.zero_()
         for k, v in self.data.episode_data.items():
             v.zero_()
+        for visits in self.marie_sample_visits.values():
+            visits.zero_()
             
     def __repr__(self):
         return "ReplayBuffer. {}/{} episodes. Keys:{} Groups:{}".format(self.episodes_in_buffer,

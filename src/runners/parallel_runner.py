@@ -117,7 +117,7 @@ class ParallelRunner:
         
     
     @th.no_grad()
-    def run(self, test_mode=False):
+    def run(self, test_mode=False, step_callback=None):
         self.reset()
         all_terminated = False
         episode_returns = [0 for _ in range(self.batch_size_run)]
@@ -221,7 +221,13 @@ class ParallelRunner:
             pre_transition_data["actor_hidden_states"] = actor_hidden_states
             self.batch.update(pre_transition_data, bs=envs_not_terminated, ts=self.t, mark_filled=True)
 
-        if not test_mode:
+            if not test_mode and step_callback is not None:
+                steps_collected = len(envs_not_terminated)
+                self.t_env += steps_collected
+                with th.enable_grad():
+                    step_callback(steps_collected)
+
+        if not test_mode and step_callback is None:
             self.t_env += self.env_steps_this_run
 
         # Get stats back for each env
@@ -313,6 +319,10 @@ class ParallelRunner:
             print(f"Warning: Could not save timestep predictions: {e}")
 
     def _log(self, returns, stats, prefix):
+        if prefix == "test_" and stats.get("n_episodes", 0):
+            self.last_test_battle_won = (
+                stats.get("battle_won", 0) / stats["n_episodes"]
+            )
         self.logger.log_stat(prefix + "return_mean", np.mean(returns), self.t_env)
         self.logger.log_stat(prefix + "return_std", np.std(returns), self.t_env)
         returns.clear()

@@ -14,6 +14,16 @@ buffer_size: 512 # recalculated from capacity_steps by run.py
 matwm_replay_capacity_steps: 50000
 matwm_replay_decay: 0.9998
 matwm_prefill_steps: 1000
+matwm_updates_per_collect: 1
+matwm_updates_per_env_step: null
+matwm_sequence_replay: False
+matwm_interleaved_updates: False
+matwm_joint_action_dynamics: False
+matwm_predicted_teammate_ratio: 0.0
+matwm_soft_teammate_actions: False
+matwm_real_critic_coef: 0.0
+matwm_reward_ensemble_size: 1
+matwm_uncertainty_penalty: 0.0
 
 # OpenTrainMAC shares this recurrent-state field with legacy teammate policies.
 # MATWM's transformer state is separate (`matwm_hidden_dim`).
@@ -33,6 +43,9 @@ matwm_dropout: 0.0
 matwm_reward_bins: 255
 matwm_reward_low: -20.0
 matwm_reward_high: 20.0
+matwm_reward_zero_epsilon: 0.000001
+matwm_reward_prediction_threshold: 0.1
+matwm_reward_event_threshold: 1.0
 
 matwm_world_lr: 0.00003
 matwm_agent_lr: 0.0003

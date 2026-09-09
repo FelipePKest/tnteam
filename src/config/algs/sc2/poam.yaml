@@ -45,6 +45,10 @@ gae_lambda: 0.95
 q_nstep: 5 # 1 corresponds to normal r + gammaV
 
 epochs: 5
+# Optional target actor optimizer steps per collected environment transition.
+# When set, the learner dynamically scales PPO epochs by the actual unpadded
+# episode length. Null preserves the original fixed-epoch POAM procedure.
+poam_actor_updates_per_env_step: null
 n_minibatch: 1
 eps_clip: 0.1
 lr: 0.0005

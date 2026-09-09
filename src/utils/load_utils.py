@@ -4,6 +4,9 @@ import json
 
 
 def find_model_path(checkpoint_path, load_step, logger=None):
+    # Sacred parses numeric command-line overrides as ints, while older YAML
+    # configurations commonly store this option as a string.
+    load_step = str(load_step)
     timesteps = []
     other_ckpts = []
     if not os.path.isdir(checkpoint_path):

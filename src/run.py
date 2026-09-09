@@ -133,7 +133,11 @@ def run_sequential(args, logger):
     preprocess = {"actions": ("actions_onehot", [OneHot(out_dim=args.n_actions)])}
 
     buffer_size = args.buffer_size
-    if args.learner == "matwm_learner":
+    is_world_model_learner = args.learner in {
+        "matwm_learner", "marie_learner"
+    }
+    is_reference_marie = args.learner == "marie_reference_learner"
+    if is_world_model_learner:
         capacity_steps = getattr(args, "matwm_replay_capacity_steps", None)
         if capacity_steps is not None:
             buffer_size = max(
@@ -148,6 +152,23 @@ def run_sequential(args, logger):
         preprocess=preprocess,
         device="cpu" if args.buffer_cpu_only else args.device,
     )
+    latent_ppo_batch_size = getattr(args, "matwm_ppo_batch_episodes", 0)
+    use_batched_latent_ppo = (
+        is_world_model_learner
+        and getattr(args, "matwm_real_policy_algorithm", "awr") == "ppo"
+        and latent_ppo_batch_size > args.batch_size_run
+    )
+    policy_buffer = None
+    policy_collections = 0
+    if use_batched_latent_ppo:
+        policy_buffer = ReplayBuffer(
+            scheme,
+            groups,
+            latent_ppo_batch_size,
+            env_info["episode_limit"] + 1,
+            preprocess=preprocess,
+            device="cpu" if args.buffer_cpu_only else args.device,
+        )
 
     # Setup multiagent controller here
     mac = mac_REGISTRY[args.mac](buffer.scheme, groups, args)
@@ -169,7 +190,8 @@ def run_sequential(args, logger):
         model_path, timestep_to_load = find_model_path(args.checkpoint_path, args.load_step, logger=logger)
         logger.console_logger.info(f"Loading model from ts {timestep_to_load}, {model_path}")
         learner.load_models(model_path)
-        # runner.t_env = timestep_to_load
+        if getattr(args, "resume_t_env_from_checkpoint", False):
+            runner.t_env = timestep_to_load
 
     if args.eval_mode in ["default", "open"] or args.save_replay:
         runner.log_train_stats_t = runner.t_env
@@ -185,35 +207,185 @@ def run_sequential(args, logger):
     last_log_T = 0
     model_save_time = 0
     best_test_return = -1000000
+    best_test_win_rate = -1.0
 
     start_time = time.time()
     last_time = start_time
 
     logger.console_logger.info("Beginning training for {} timesteps".format(args.t_max))
 
+    interleaved_updates = (
+        is_world_model_learner
+        and getattr(args, "matwm_interleaved_updates", False)
+        and not use_batched_latent_ppo
+        and getattr(args, "matwm_real_policy_algorithm", "awr") != "ppo"
+    )
+    interleaved_update_credit = 0.0
+    canonical_marie = (
+        args.learner == "marie_learner"
+        and getattr(args, "marie_original_procedure", False)
+    )
+    marie_new_transitions = 0
+
+    def train_matwm_replay_once():
+        if getattr(args, "matwm_sequence_replay", False):
+            sequence_length = getattr(args, "matwm_max_seq_length", 64)
+            if not buffer.can_sample_sequences(args.batch_size, sequence_length):
+                return False
+            episode_sample = buffer.sample_sequences(
+                args.batch_size,
+                sequence_length,
+                recency_decay=getattr(args, "matwm_replay_decay", None),
+            )
+        else:
+            if not buffer.can_sample(args.batch_size):
+                return False
+            episode_sample = buffer.sample(
+                args.batch_size,
+                recency_decay=getattr(args, "matwm_replay_decay", None),
+            )
+        max_ep_t = episode_sample.max_t_filled()
+        episode_sample = episode_sample[:, :max_ep_t]
+        if episode_sample.device != args.device:
+            episode_sample.to(args.device)
+        learner.train(episode_sample, runner.t_env, episode)
+        return True
+
+    def train_matwm_after_step(steps_collected):
+        nonlocal interleaved_update_credit
+        update_ratio = getattr(args, "matwm_updates_per_env_step", 1.0)
+        if update_ratio is None:
+            update_ratio = 1.0
+        interleaved_update_credit += steps_collected * float(update_ratio)
+        while interleaved_update_credit >= 1.0:
+            if not train_matwm_replay_once():
+                # Do not create a large catch-up burst while replay is warming up.
+                interleaved_update_credit = 0.0
+                break
+            interleaved_update_credit -= 1.0
+
     while runner.t_env <= args.t_max:
         # Run for a whole episode at a time
-        episode_batch, _ = runner.run(test_mode=False) # batch_size_run eps collected
-        buffer.insert_episode_batch(episode_batch)
-        if buffer.can_sample(args.batch_size): # when batch_size eps collected
+        step_callback = train_matwm_after_step if interleaved_updates else None
+        episode_batch, _ = runner.run(
+            test_mode=False, step_callback=step_callback
+        ) # batch_size_run eps collected
+        if is_reference_marie:
+            learner.train_episode(episode_batch, runner.t_env, episode)
+        else:
+            buffer.insert_episode_batch(episode_batch)
+        if is_reference_marie:
+            pass
+        elif canonical_marie:
+            marie_new_transitions += runner.env_steps_this_run
+            update_interval = getattr(args, "marie_new_samples_per_update", 100)
+            minimum_replay = getattr(args, "marie_min_replay_steps", 1000)
+            if buffer.marie_transition_count() < minimum_replay:
+                # Upstream retains only enough credit for the first update;
+                # it does not execute a catch-up burst after replay warm-up.
+                marie_new_transitions = min(
+                    marie_new_transitions, update_interval
+                )
+            if (
+                marie_new_transitions >= update_interval
+                and buffer.marie_transition_count() >= minimum_replay
+            ):
+                learner.train_from_replay(buffer, runner.t_env, episode)
+                marie_new_transitions = 0
+        elif use_batched_latent_ppo:
+            policy_buffer.insert_episode_batch(episode_batch)
+            policy_collections += 1
+            if policy_buffer.can_sample(latent_ppo_batch_size):
+                policy_batch = policy_buffer.sample(latent_ppo_batch_size)
+                max_policy_t = policy_batch.max_t_filled()
+                policy_batch = policy_batch[:, :max_policy_t]
+                if policy_batch.device != args.device:
+                    policy_batch.to(args.device)
+                learner.train_real_ppo(policy_batch, runner.t_env, episode)
+
+                recency_decay = getattr(args, "matwm_replay_decay", None)
+                if recency_decay is not None:
+                    recency_decay = recency_decay ** env_info["episode_limit"]
+                queued_updates = (
+                    getattr(args, "matwm_updates_per_collect", 1)
+                    * policy_collections
+                )
+                for _ in range(queued_updates):
+                    episode_sample = buffer.sample(
+                        args.batch_size, recency_decay=recency_decay
+                    )
+                    max_ep_t = episode_sample.max_t_filled()
+                    episode_sample = episode_sample[:, :max_ep_t]
+                    if episode_sample.device != args.device:
+                        episode_sample.to(args.device)
+                    learner.train_world_only(
+                        episode_sample, runner.t_env, episode
+                    )
+                policy_buffer.clear()
+                policy_collections = 0
+        elif not interleaved_updates and buffer.can_sample(args.batch_size): # when batch_size eps collected
+            use_latent_ppo = (
+                is_world_model_learner
+                and getattr(args, "matwm_real_policy_algorithm", "awr") == "ppo"
+            )
+            if use_latent_ppo:
+                policy_batch = episode_batch
+                max_policy_t = policy_batch.max_t_filled()
+                policy_batch = policy_batch[:, :max_policy_t]
+                if policy_batch.device != args.device:
+                    policy_batch.to(args.device)
+                learner.train_real_ppo(policy_batch, runner.t_env, episode)
+
             recency_decay = (
                 getattr(args, "matwm_replay_decay", None)
-                if args.learner == "matwm_learner" else None
+                if is_world_model_learner else None
             )
             if recency_decay is not None:
                 # Replay entries are episodes; preserve the paper's per-step decay.
                 recency_decay = recency_decay ** env_info["episode_limit"]
-            episode_sample = buffer.sample(
-                args.batch_size, recency_decay=recency_decay
-            )
+            updates_per_collect = 1
+            if is_world_model_learner:
+                updates_per_env_step = getattr(
+                    args, "matwm_updates_per_env_step", None
+                )
+                if updates_per_env_step is None:
+                    updates_per_collect = getattr(
+                        args, "matwm_updates_per_collect", 1
+                    )
+                else:
+                    updates_per_collect = max(
+                        1,
+                        int(math.ceil(
+                            runner.env_steps_this_run * updates_per_env_step
+                        )),
+                    )
+            for _ in range(updates_per_collect):
+                if (
+                    is_world_model_learner
+                    and getattr(args, "matwm_sequence_replay", False)
+                ):
+                    episode_sample = buffer.sample_sequences(
+                        args.batch_size,
+                        getattr(args, "matwm_max_seq_length", 64),
+                        recency_decay=getattr(args, "matwm_replay_decay", None),
+                    )
+                else:
+                    episode_sample = buffer.sample(
+                        args.batch_size, recency_decay=recency_decay
+                    )
 
-            # Truncate batch to only filled timesteps
-            max_ep_t = episode_sample.max_t_filled()
-            episode_sample = episode_sample[:, :max_ep_t]
+                # Truncate batch to only filled timesteps
+                max_ep_t = episode_sample.max_t_filled()
+                episode_sample = episode_sample[:, :max_ep_t]
 
-            if episode_sample.device != args.device:
-                episode_sample.to(args.device)
-            learner.train(episode_sample, runner.t_env, episode) 
+                if episode_sample.device != args.device:
+                    episode_sample.to(args.device)
+                if use_latent_ppo:
+                    learner.train_world_only(
+                        episode_sample, runner.t_env, episode
+                    )
+                else:
+                    learner.train(episode_sample, runner.t_env, episode)
 
             if args.on_policy:
                 buffer.clear()
@@ -258,13 +430,25 @@ def run_sequential(args, logger):
 
             # save best checkpoint
             assert mean_test_return is not None
-            if mean_test_return > best_test_return:
+            test_win_rate = getattr(runner, "last_test_battle_won", -1.0)
+            marie_selection = getattr(args, "marie_original_procedure", False)
+            is_better = (
+                (test_win_rate, mean_test_return)
+                > (best_test_win_rate, best_test_return)
+                if marie_selection else mean_test_return > best_test_return
+            )
+            if is_better:
                 best_test_return = mean_test_return
+                best_test_win_rate = test_win_rate
                 save_path = os.path.join(args.local_results_path, "models", args.expt_logname, "best")
                 os.makedirs(save_path, exist_ok=True)
                 # make json file with best_test_return
                 with open(os.path.join(save_path, "best_info.json"), 'w') as f:
-                    json.dump({"best_test_return": best_test_return, "best_ts": str(runner.t_env)}, f)
+                    json.dump({
+                        "best_test_return": best_test_return,
+                        "best_test_win_rate": best_test_win_rate,
+                        "best_ts": str(runner.t_env),
+                    }, f)
                 logger.console_logger.info("Saving models to {}".format(save_path))
                 learner.save_models(save_path)
         
@@ -290,6 +474,8 @@ def run_sequential(args, logger):
             last_log_T = runner.t_env
 
     runner.close_env()
+    if hasattr(learner, "close"):
+        learner.close()
     logger.console_logger.info("Finished Training")
 
 
