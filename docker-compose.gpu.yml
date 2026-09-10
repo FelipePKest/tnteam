@@ -12,6 +12,7 @@ x-training-common: &training-common
   environment:
     SC2PATH: /workspace/tnteam/3rdparty/StarCraftII
     MARIE_REFERENCE_ROOT: /workspace/MARIE
+    PYTHONPATH: /workspace/tnteam/src:/workspace/MARIE:/workspace/MARIE/agent/models
     PYTHONUNBUFFERED: "1"
     PYTORCH_CUDA_ALLOC_CONF: max_split_size_mb:128
     WANDB_MODE: disabled

@@ -25,6 +25,12 @@ Build from the tnteam directory:
 docker-compose -f docker-compose.gpu.yml build
 ```
 
+After changing dependencies, force Docker to rebuild the installation layer:
+
+```bash
+docker build --no-cache -t tnteam-marie:cu117 .
+```
+
 Run either experiment in the foreground:
 
 ```bash

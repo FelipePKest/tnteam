@@ -7,6 +7,7 @@ ENV PYTHONUNBUFFERED=1 \
     MPLCONFIGDIR=/tmp/matplotlib \
     SC2PATH=/workspace/tnteam/3rdparty/StarCraftII \
     MARIE_REFERENCE_ROOT=/workspace/MARIE \
+    PYTHONPATH=/workspace/tnteam/src:/workspace/MARIE:/workspace/MARIE/agent/models \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
@@ -27,7 +28,8 @@ RUN python -m pip install --upgrade "pip<25" wheel setuptools && \
         --extra-index-url https://download.pytorch.org/whl/cu117 && \
     python -m pip install torch-scatter \
         -f https://data.pyg.org/whl/torch-1.13.1+cu117.html && \
-    python -m pip install -r /tmp/tnteam-requirements.txt
+    python -m pip install -r /tmp/tnteam-requirements.txt && \
+    python -c "import torch, vector_quantize_pytorch; print(torch.__version__)"
 
 COPY . /workspace/tnteam
 
