@@ -39,7 +39,7 @@ marie_tokenizer_hidden_dim: 256
 marie_stack_obs: 5
 marie_tokenizer_lr: 0.0003
 marie_tokenizer_batch_size: 256
-marie_tokenizer_weight_decay: 0.0
+marie_tokenizer_weight_decay: 0.01
 marie_tokenizer_grad_clip: 10.0
 marie_tokenizer_entropy_coef: 0.001
 marie_vq_ema_decay: 0.8
@@ -52,10 +52,10 @@ marie_policy_epochs: 5
 marie_imagined_ppo: True
 marie_ppo_epochs: 5
 marie_ppo_clip: 0.2
-marie_value_coef: 0.5
+marie_value_coef: 1.0
 marie_world_warmup_events: 9
 marie_policy_warmup_events: 19
-marie_terminal_loss_weight: 2.0
+marie_terminal_loss_weight: 1.0
 marie_validation_horizon: 5
 matwm_encoder_hidden_dim: 256
 matwm_encoder_layers: 3
@@ -79,6 +79,7 @@ marie_critic_heads: 8
 marie_policy_temperature: 1.0
 
 matwm_world_lr: 0.0001
+marie_world_eps: 0.00000001
 marie_world_weight_decay: 0.01
 matwm_agent_lr: 0.0005
 matwm_ppo_separate_critic: True

@@ -111,8 +111,7 @@ class OpenTrainMAC:
             self.trained_agent.set_classifier_module(classifier)
         
     def init_hidden(self, batch_size):
-        # Stateful loaders (including reference MARIE's observation stack)
-        # must be reset at every episode boundary.
+        # Stateful loaders must be reset at every episode boundary.
         if hasattr(self.trained_agent, "init_hidden"):
             self.trained_agent.init_hidden(batch_size)
         return th.zeros(batch_size, 1, self.n_agents, self.args.hidden_dim)

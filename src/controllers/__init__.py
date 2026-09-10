@@ -8,7 +8,6 @@ from .open_eval_controller import OpenEvalMAC
 from .open_train_controller import OpenTrainMAC
 from .matwm_controller import MATWMMAC
 from .marie_controller import MARIEMAC
-from .marie_reference_controller import MARIEReferenceMAC
 
 REGISTRY["basic_mac_old"] = BasicMACOld
 REGISTRY["basic_mac"] = BasicMAC
@@ -18,4 +17,3 @@ REGISTRY["open_eval_mac"] = OpenEvalMAC
 REGISTRY["open_train_mac"] = OpenTrainMAC
 REGISTRY["matwm_mac"] = MATWMMAC
 REGISTRY["marie_mac"] = MARIEMAC
-REGISTRY["marie_reference_mac"] = MARIEReferenceMAC

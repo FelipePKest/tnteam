@@ -3,6 +3,7 @@
 import os
 
 import torch as th
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam, AdamW
 
@@ -21,7 +22,7 @@ class MARIELearner(MATWMLearner):
         self.tokenizer_optimiser = AdamW(
             tokenizer_parameters,
             lr=getattr(args, "marie_tokenizer_lr", 3e-4),
-            weight_decay=getattr(args, "marie_tokenizer_weight_decay", 0.0),
+            weight_decay=getattr(args, "marie_tokenizer_weight_decay", 0.01),
         )
         tokenizer_ids = {
             id(parameter) for parameter in tokenizer_parameters
@@ -32,11 +33,33 @@ class MARIELearner(MATWMLearner):
         ]
         # Upstream treats encoded token IDs as fixed targets while updating the
         # world model. Do not let the world optimizer move the tokenizer.
+        world_ids = {id(parameter) for parameter in world_parameters}
+        decay_ids = set()
+        for module in self.world_model.modules():
+            if isinstance(module, (nn.Linear, nn.Conv1d, nn.MultiheadAttention)):
+                weight = getattr(module, "weight", None)
+                if weight is not None and id(weight) in world_ids:
+                    decay_ids.add(id(weight))
+                # MultiheadAttention stores its combined projection directly.
+                projection = getattr(module, "in_proj_weight", None)
+                if projection is not None and id(projection) in world_ids:
+                    decay_ids.add(id(projection))
+        decay_parameters = [
+            parameter for parameter in world_parameters
+            if id(parameter) in decay_ids
+        ]
+        no_decay_parameters = [
+            parameter for parameter in world_parameters
+            if id(parameter) not in decay_ids
+        ]
+        world_weight_decay = getattr(args, "marie_world_weight_decay", 0.01)
         self.world_optimiser = AdamW(
-            world_parameters,
+            [
+                {"params": decay_parameters, "weight_decay": world_weight_decay},
+                {"params": no_decay_parameters, "weight_decay": 0.0},
+            ],
             lr=getattr(args, "matwm_world_lr", 1e-4),
-            eps=getattr(args, "optim_eps", 1e-5),
-            weight_decay=getattr(args, "marie_world_weight_decay", 0.01),
+            eps=getattr(args, "marie_world_eps", 1e-8),
         )
         actor_parameters = list(self.policy.actor_parameters())
         critic_parameters = list(self.policy.critic_parameters())
@@ -171,14 +194,19 @@ class MARIELearner(MATWMLearner):
 
             with th.no_grad():
                 latent, _ = self.world_model.encode(focal_obs, sample=False)
+            reference_layout = (
+                getattr(self.args, "marie_original_procedure", False)
+                and hasattr(
+                    self.world_model, "reference_teacher_forced_dynamics"
+                )
+            )
             if hasattr(self.world_model, "teacher_forced_dynamics"):
                 # Upstream DreamerMemory masks attention across every done
                 # boundary, separately for each agent stream.
                 team_done = terminated[:, :length].bool().squeeze(-1)
-                token_count = (
-                    length * self.world_model.block_size
-                    + self.world_model.n_latents
-                )
+                token_count = length * self.world_model.block_size
+                if not reference_layout:
+                    token_count += self.world_model.n_latents
                 attention_mask = th.zeros(
                     batch_size, token_count, token_count,
                     dtype=th.bool, device=obs.device,
@@ -206,11 +234,20 @@ class MARIELearner(MATWMLearner):
                 attention_mask = attention_mask.repeat_interleave(
                     n_agents, dim=0
                 )
-                hidden, dynamics_logits = (
-                    self.world_model.teacher_forced_dynamics(
-                        latent, focal_actions[:, :-1], focal, attention_mask
+                if reference_layout:
+                    hidden, dynamics_logits = (
+                        self.world_model.reference_teacher_forced_dynamics(
+                            latent[:, :length], focal_actions[:, :length],
+                            focal, attention_mask,
+                        )
                     )
-                )
+                else:
+                    hidden, dynamics_logits = (
+                        self.world_model.teacher_forced_dynamics(
+                            latent, focal_actions[:, :-1], focal,
+                            attention_mask,
+                        )
+                    )
                 heads = self.world_model.prediction_auxiliary_heads(
                     hidden, latent[:, :-1]
                 )
@@ -223,11 +260,29 @@ class MARIELearner(MATWMLearner):
                     hidden, latent[:, :-1], latent[:, 1:]
                 )
 
-            token_target = latent[:, 1:].argmax(-1)
-            token_loss = F.cross_entropy(
-                heads["dynamics_logits"].reshape(-1, self.world_model.n_categories),
-                token_target.reshape(-1), reduction="none",
-            ).view(batch_size * n_agents, length, -1).mean(-1, keepdim=True)
+            if reference_layout:
+                token_target = latent[:, :length].argmax(-1).reshape(
+                    batch_size * n_agents, -1
+                )[:, 1:]
+                token_loss_value = F.cross_entropy(
+                    heads["dynamics_logits"].reshape(
+                        -1, self.world_model.n_categories
+                    ),
+                    token_target.reshape(-1),
+                )
+                token_loss = token_loss_value.expand(
+                    batch_size * n_agents, length, 1
+                )
+            else:
+                token_target = latent[:, 1:].argmax(-1)
+                token_loss = F.cross_entropy(
+                    heads["dynamics_logits"].reshape(
+                        -1, self.world_model.n_categories
+                    ),
+                    token_target.reshape(-1), reduction="none",
+                ).view(
+                    batch_size * n_agents, length, -1
+                ).mean(-1, keepdim=True)
 
             reward_target = rewards[:, :length, None].expand(
                 -1, -1, n_agents, -1
@@ -249,22 +304,41 @@ class MARIELearner(MATWMLearner):
             continuation_loss = F.binary_cross_entropy_with_logits(
                 heads["continuation_logits"], continue_target, reduction="none"
             )
-            # Terminal transitions are sparse on continuing-episode SMAC.
-            # Preserve the Bernoulli objective used upstream while preventing
-            # the all-continuing solution from dominating the minibatch.
+            # Canonical MARIE applies the Bernoulli objective uniformly. Keep
+            # an explicit weight only as a backwards-compatible override.
             terminal_weight = getattr(
-                self.args, "marie_terminal_loss_weight", 2.0
+                self.args, "marie_terminal_loss_weight", 1.0
             )
             continuation_loss = continuation_loss * th.where(
                 continue_target.bool(), 1.0, terminal_weight
             )
-            availability_loss = F.cross_entropy(
-                heads["availability_logits"].reshape(-1, 2),
-                focal_available[:, 1:].long().reshape(-1),
-                reduction="none",
-            ).view(batch_size * n_agents, length, self.n_actions).mean(
-                -1, keepdim=True
-            )
+            if reference_layout:
+                availability_steps = length - 1
+                availability_loss = heads["availability_logits"].new_zeros(
+                    batch_size * n_agents, length, 1
+                )
+                if availability_steps:
+                    availability_raw = F.cross_entropy(
+                        heads["availability_logits"][
+                            :, :availability_steps
+                        ].reshape(-1, 2),
+                        focal_available[:, 1:length].long().reshape(-1),
+                        reduction="none",
+                    ).view(
+                        batch_size * n_agents, availability_steps,
+                        self.n_actions,
+                    ).mean(-1, keepdim=True)
+                    availability_loss[:, :availability_steps] = (
+                        availability_raw * length / availability_steps
+                    )
+            else:
+                availability_loss = F.cross_entropy(
+                    heads["availability_logits"].reshape(-1, 2),
+                    focal_available[:, 1:].long().reshape(-1),
+                    reduction="none",
+                ).view(
+                    batch_size * n_agents, length, self.n_actions
+                ).mean(-1, keepdim=True)
 
             total = token_loss + reward_loss + continuation_loss + availability_loss
             loss = self._masked_mean(total, focal_valid)
@@ -285,20 +359,34 @@ class MARIELearner(MATWMLearner):
                     (predicted_terminal & terminal_target & focal_valid.bool()).sum()
                     / terminal_count.clamp_min(1)
                 )
+                availability_logits = heads["availability_logits"]
+                availability_target = focal_available[:, 1:].bool()
+                if reference_layout:
+                    availability_logits = availability_logits[:, :-1]
+                    availability_target = focal_available[:, 1:length].bool()
                 availability_prediction = self.world_model.availability_from_logits(
-                    heads["availability_logits"]
+                    availability_logits
                 )
                 availability_correct = (
-                    availability_prediction == focal_available[:, 1:].bool()
+                    availability_prediction == availability_target
                 ).float().mean(-1, keepdim=True)
-                token_accuracy = (
-                    heads["dynamics_logits"].argmax(-1) == token_target
-                ).float().mean(-1, keepdim=True)
+                if reference_layout:
+                    token_accuracy_value = (
+                        heads["dynamics_logits"].argmax(-1) == token_target
+                    ).float().mean()
+                    token_accuracy = token_accuracy_value.expand(
+                        batch_size * n_agents, length, 1
+                    )
+                else:
+                    token_accuracy = (
+                        heads["dynamics_logits"].argmax(-1) == token_target
+                    ).float().mean(-1, keepdim=True)
                 # Open-loop validation: feed generated tokens back into the
                 # model while retaining the recorded actions. This exposes
                 # compounding errors hidden by teacher-forced CE.
                 rollout_correct = []
                 if validate_rollout:
+                    rollout_target = latent[:, 1:].argmax(-1)
                     rollout_horizon = min(
                         getattr(self.args, "marie_validation_horizon", 5), length
                     )
@@ -319,7 +407,7 @@ class MARIELearner(MATWMLearner):
                         )
                         rollout_index = rollout_logits.argmax(-1)
                         rollout_correct.append((
-                            rollout_index == token_target[:, rollout_step]
+                            rollout_index == rollout_target[:, rollout_step]
                         ).float().mean())
                         rollout_next = F.one_hot(
                             rollout_index, self.world_model.n_categories
@@ -345,7 +433,8 @@ class MARIELearner(MATWMLearner):
                     token_accuracy, focal_valid
                 ).item(),
                 "marie_availability_accuracy": self._masked_mean(
-                    availability_correct, focal_valid
+                    availability_correct,
+                    focal_valid[:, :availability_correct.shape[1]],
                 ).item(),
                 "marie_terminal_recall": terminal_recall.item(),
                 "matwm_world_grad_norm": float(grad_norm),
@@ -406,7 +495,7 @@ class MARIELearner(MATWMLearner):
                 batch = self._replay_batch(
                     replay,
                     getattr(self.args, "batch_size", 30),
-                    getattr(self.args, "matwm_max_seq_length", 15) - 1,
+                    getattr(self.args, "matwm_max_seq_length", 15),
                     "model",
                 )
                 world_stats.append(self._train_world_model(
@@ -504,6 +593,12 @@ class MARIELearner(MATWMLearner):
         )
 
     def load_models(self, path):
+        if (
+            not os.path.exists(os.path.join(path, "agent.th"))
+            and os.path.exists(os.path.join(path, "reference_marie.pt"))
+        ):
+            self.mac.load_models(path)
+            return
         super().load_models(path)
         tokenizer_path = os.path.join(path, "tokenizer_opt.th")
         if os.path.exists(tokenizer_path):

@@ -8,10 +8,7 @@ from .type_conditional_loader import TypeConditionalAgentLoader
 from .type_matched_train_loader import TypeMatchedTrainLoader
 from .clam_train_agent_loader import CLAMTrainAgentLoader
 from .matwm_train_agent_loader import MATWMTrainAgentLoader
-from .marie_agent_loader import (
-    MARIEEvalAgentLoader, MARIETrainAgentLoader,
-    MARIEReferenceTrainAgentLoader,
-)
+from .marie_agent_loader import MARIEEvalAgentLoader, MARIETrainAgentLoader
 
 
 REGISTRY["rnn_eval_agent_loader"] = RNNEvalAgentLoader
@@ -24,4 +21,3 @@ REGISTRY["clam_train_agent_loader"] = CLAMTrainAgentLoader
 REGISTRY["matwm_train_agent_loader"] = MATWMTrainAgentLoader
 REGISTRY["marie_train_agent_loader"] = MARIETrainAgentLoader
 REGISTRY["marie_eval_agent_loader"] = MARIEEvalAgentLoader
-REGISTRY["marie_reference_train_agent_loader"] = MARIEReferenceTrainAgentLoader

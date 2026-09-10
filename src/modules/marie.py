@@ -7,21 +7,13 @@ remains decentralized and consumes only the focal agent's model features.
 """
 
 import copy
-import sys
 
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
 from modules.matwm import MATWMPolicy, MATWMWorldModel
-
-# Use the exact quantizer shipped by the reference MARIE checkout.  Keeping
-# this import explicit prevents silently falling back to the earlier custom
-# EMA implementation, whose codebook utilization was far lower.
-_REFERENCE_MODELS = "/home/jupyter-jphuser3/MARIE/agent/models"
-if _REFERENCE_MODELS not in sys.path:
-    sys.path.insert(0, _REFERENCE_MODELS)
-from vector_quantize_pytorch import VectorQuantize
+from modules.vector_quantizer import EMAVectorQuantizer
 
 
 class _FixedKVCache:
@@ -192,12 +184,8 @@ class MARIEVQTokenizer(nn.Module):
             nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
             nn.Linear(hidden_dim, n_tokens * embed_dim),
         )
-        self.quantizer = VectorQuantize(
-            dim=embed_dim,
-            codebook_size=vocab_size,
-            learnable_codebook=False,
-            ema_update=True,
-            decay=ema_decay,
+        self.quantizer = EMAVectorQuantizer(
+            dim=embed_dim, codebook_size=vocab_size, decay=ema_decay
         )
         self.commitment_weight = commitment_weight
         self._last_commitment_loss = None
@@ -358,6 +346,14 @@ class MARIEWorldModel(MATWMWorldModel):
 
     def __init__(self, obs_dim, n_agents, n_actions, args):
         super().__init__(obs_dim, n_agents, n_actions, args)
+        # MATWM owns additional dynamics and teammate-prediction modules that
+        # are not part of MARIE. Remove them before constructing the MARIE
+        # model so they cannot enter checkpoints or optimizer groups.
+        for name in (
+            "action_mixer", "dynamics", "action_mask", "teammate_input",
+            "teammate_position", "teammate_model", "teammate_head",
+        ):
+            delattr(self, name)
         self.sequence_model = CachedCausalTransformer(
             self.hidden_dim,
             getattr(args, "matwm_attention_heads", 8),
@@ -379,29 +375,23 @@ class MARIEWorldModel(MATWMWorldModel):
             nn.Linear(tokenizer_hidden, tokenizer_hidden), nn.GELU(),
             nn.Linear(tokenizer_hidden, obs_dim),
         )
-        self.action_mixer = nn.Linear(
-            self.token_feature_dim + n_agents * n_actions, self.hidden_dim
-        )
         # Dynamics uses a free token embedding, independent of VQ codebook
         # geometry, as in upstream MARIE.
         self.world_token_embedding = nn.Embedding(
             self.n_categories, self.hidden_dim
         )
-        self.action_token_projection = nn.Linear(
-            n_agents * n_actions, self.hidden_dim
+        # MARIE shares one action embedding table across decentralized agent
+        # streams; agent identity is supplied only to the Perceiver context.
+        self.action_token_embedding = nn.Embedding(
+            n_actions, self.hidden_dim
         )
         self.block_size = self.n_latents + 2  # observation, action, aggregate
         self.position = nn.Parameter(th.zeros(
             1,
-            self.max_seq_length * self.block_size + self.n_latents,
+            self.max_seq_length * self.block_size,
             self.hidden_dim,
         ))
         nn.init.normal_(self.position, std=0.02)
-        self.next_token_start = nn.Parameter(th.zeros(1, self.hidden_dim))
-        self.generation_position = nn.Parameter(th.zeros(
-            1, self.n_latents, self.hidden_dim
-        ))
-        nn.init.normal_(self.generation_position, std=0.02)
         self.next_token_head = nn.Sequential(
             nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(),
             nn.Linear(self.hidden_dim, self.n_categories),
@@ -422,7 +412,9 @@ class MARIEWorldModel(MATWMWorldModel):
         agent_position = th.empty(30, self.hidden_dim)
         agent_position[:, 0::2] = th.sin(angle[:, 0::2])
         agent_position[:, 1::2] = th.cos(angle[:, 1::2])
-        self.register_buffer("perceiver_agent_position", agent_position)
+        self.register_buffer(
+            "perceiver_agent_position", agent_position, persistent=False
+        )
         def auxiliary_head(output_dim):
             return nn.Sequential(
                 nn.Linear(self.hidden_dim, self.hidden_dim), nn.ReLU(),
@@ -438,7 +430,30 @@ class MARIEWorldModel(MATWMWorldModel):
         # tends to hide errors on the comparatively rare attack actions.
         self.next_availability = auxiliary_head(n_actions * 2)
         self.reward_uses_mlp = False
+        self._initialize_reference_world_model()
         self.encoder.eval()
+
+    def _initialize_reference_world_model(self):
+        """Apply MARIE's N(0, .02) model initialization, excluding the VQ AE."""
+        for name, module in self.named_modules():
+            if name == "encoder" or name.startswith("encoder."):
+                continue
+            if name == "decoder" or name.startswith("decoder."):
+                continue
+            if isinstance(module, (nn.Linear, nn.Embedding)):
+                nn.init.normal_(module.weight, mean=0.0, std=0.02)
+                if isinstance(module, nn.Linear) and module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.LayerNorm):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def teammate_logits(self, latent, detach_encoder=True):
+        """Compatibility placeholder; MARIE has no teammate prediction head."""
+        del detach_encoder
+        return latent.new_zeros(
+            *latent.shape[:-2], self.n_agents, self.n_actions
+        )
 
     def token_features(self, latent):
         return self.encoder.embed(latent).flatten(-2)
@@ -453,16 +468,20 @@ class MARIEWorldModel(MATWMWorldModel):
 
     def _dynamics_blocks(self, latent, actions, focal_ids):
         length = latent.shape[1]
-        is_soft_joint = actions.dim() >= 4 and actions.shape[-2:] == (
+        if actions.dim() >= 4 and actions.shape[-2:] == (
             self.n_agents, self.n_actions
-        )
-        if actions.shape[-1] == self.n_agents or is_soft_joint:
-            action = self.joint_action(actions)
+        ):
+            agent_index = focal_ids[:, None, None, None].expand(
+                -1, length, 1, self.n_actions
+            )
+            action_ids = actions.gather(-2, agent_index).squeeze(-2).argmax(-1)
+        elif actions.dim() == 3 and actions.shape[-1] == self.n_agents:
+            agent_index = focal_ids[:, None, None].expand(-1, length, 1)
+            action_ids = actions.gather(-1, agent_index).squeeze(-1).long()
         else:
-            ids = focal_ids[:, None].expand(-1, length)
-            action = self.scaled_action(actions, ids)
+            action_ids = actions.long().squeeze(-1)
         observation_tokens = self.embed_world_tokens(latent)
-        action_token = self.action_token_projection(action)
+        action_token = self.action_token_embedding(action_ids)
 
         # Central aggregation is computed before temporal prediction from all
         # agents' local observation/action encodings, then inserted as the last
@@ -544,6 +563,36 @@ class MARIEWorldModel(MATWMWorldModel):
             ), dim=1)
             logits.append(self.next_token_head(sources))
         return hidden, th.stack(logits, dim=1)
+
+    def reference_teacher_forced_dynamics(
+        self, latent, actions, focal_ids, attention_mask=None
+    ):
+        """Run the exact token shift used by ``MAWorldModel.compute_loss``.
+
+        Each replay record contributes one complete observation/action/team
+        block. Observation outputs are the first M-1 local token positions and
+        the aggregate position; shifting that stream by one predicts every
+        observation token except the first token of the sampled sequence.
+        """
+        length = actions.shape[1]
+        blocks = self._dynamics_blocks(latent[:, :length], actions, focal_ids)
+        streams = blocks.shape[0]
+        sequence_tokens = blocks.reshape(
+            streams, length * self.block_size, self.hidden_dim
+        )
+        sequence_tokens = sequence_tokens + self.position[
+            :, :sequence_tokens.shape[1]
+        ]
+        sequence = self.sequence_model(
+            sequence_tokens, mask=attention_mask
+        ).view(streams, length, self.block_size, self.hidden_dim)
+        observation_sources = th.cat((
+            sequence[:, :, :self.n_latents - 1],
+            sequence[:, :, -1:],
+        ), dim=2).reshape(
+            streams, length * self.n_latents, self.hidden_dim
+        )[:, :-1]
+        return sequence[:, :, -1], self.next_token_head(observation_sources)
 
     def dynamics_sequence(self, latent, actions, focal_ids):
         """Autoregress over VQ observation tokens and decentralized actions."""
@@ -631,7 +680,7 @@ class MARIEWorldModel(MATWMWorldModel):
         )
         logits = []
         output, cache = self.sequence_model.forward_cached(
-            prefix.unsqueeze(1) + self.generation_position[:, :1]
+            prefix.unsqueeze(1) + self.position[:, :1]
         )
         for token_index in range(self.n_latents):
             token_logits = self.next_token_head(output[:, -1])
@@ -644,7 +693,7 @@ class MARIEWorldModel(MATWMWorldModel):
                 token = flat_target[:, token_index]
             if token_index + 1 < self.n_latents:
                 embedded = self.embed_world_tokens(token).unsqueeze(1)
-                embedded = embedded + self.generation_position[
+                embedded = embedded + self.position[
                     :, token_index + 1:token_index + 2
                 ]
                 output, cache = self.sequence_model.forward_cached(
@@ -696,7 +745,7 @@ class MARIEWorldModel(MATWMWorldModel):
         prefix = hidden.reshape(-1, self.hidden_dim)
         tokens = []
         output, cache = self.sequence_model.forward_cached(
-            prefix.unsqueeze(1) + self.generation_position[:, :1]
+            prefix.unsqueeze(1) + self.position[:, :1]
         )
         for token_index in range(self.n_latents):
             index = th.distributions.Categorical(
@@ -708,7 +757,7 @@ class MARIEWorldModel(MATWMWorldModel):
             tokens.append(token)
             if token_index + 1 < self.n_latents:
                 embedded = self.embed_world_tokens(token).unsqueeze(1)
-                embedded = embedded + self.generation_position[
+                embedded = embedded + self.position[
                     :, token_index + 1:token_index + 2
                 ]
                 output, cache = self.sequence_model.forward_cached(

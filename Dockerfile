@@ -6,8 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     MPLCONFIGDIR=/tmp/matplotlib \
     SC2PATH=/workspace/tnteam/3rdparty/StarCraftII \
-    MARIE_REFERENCE_ROOT=/workspace/MARIE \
-    PYTHONPATH=/workspace/tnteam/src:/workspace/MARIE:/workspace/MARIE/agent/models \
+    PYTHONPATH=/workspace/tnteam/src \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
@@ -29,12 +28,13 @@ RUN python -m pip install --upgrade "pip<25" wheel setuptools && \
     python -m pip install torch-scatter \
         -f https://data.pyg.org/whl/torch-1.13.1+cu117.html && \
     python -m pip install -r /tmp/tnteam-requirements.txt && \
-    python -c "import torch, vector_quantize_pytorch; print(torch.__version__)"
+    python -c "import torch; print(torch.__version__)"
 
 COPY . /workspace/tnteam
 
 RUN mkdir -p /workspace/tnteam/naht_results /workspace/tnteam/3sv5z \
         /workspace/tnteam/uncntrl_agents /tmp/matplotlib && \
-    python -m py_compile train_marie_naht_3sv5z.py train_poam_marie_utd_3sv5z.py
+    python -m py_compile train_marie_naht_3sv5z.py train_poam_marie_utd_3sv5z.py && \
+    python -c "from modules.marie import MARIEPolicy; print('tnteam MARIE import OK')"
 
 CMD ["bash"]

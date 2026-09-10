@@ -794,6 +794,14 @@ class MATWMLearner:
         original_marie = getattr(
             self.args, "marie_original_procedure", False
         )
+        controlled = None
+        trainable = batch.data.transition_data.get("trainable_agents")
+        if original_marie and trainable is not None:
+            # Policy replay returns complete teams because the centralized
+            # critic and Perceiver require them. Preserve those team inputs,
+            # but match the reference learner by applying PPO losses only to
+            # the controlled slots selected for this NAHT episode.
+            controlled = trainable[:, -1, :, 0].reshape(-1).bool()
 
         # The learned environment is fixed during policy improvement.
         with th.no_grad():
@@ -998,8 +1006,18 @@ class MATWMLearner:
         returns = th.stack(returns, 1)
         if original_marie:
             advantage = (returns - values).detach()
-            advantage = (advantage - advantage.mean()) / (
-                advantage.std(unbiased=False) + 1e-4
+            if controlled is None:
+                valid_advantage = advantage
+                advantage_scale = valid_advantage.std() + 1e-4
+            else:
+                valid_advantage = advantage[
+                    controlled[:, None, None].expand_as(advantage)
+                ]
+                advantage_scale = valid_advantage.std(
+                    unbiased=False
+                ).clamp_min(1e-5)
+            advantage = (advantage - valid_advantage.mean()) / (
+                advantage_scale
             )
         else:
             weights = th.stack(weights, 1).detach()
@@ -1039,6 +1057,12 @@ class MATWMLearner:
                 flat_focal = th.arange(
                     self.n_agents, device=focal.device
                 ).repeat(team_count * horizon)
+                flat_controlled = (
+                    None if controlled is None else
+                    team_time(
+                        controlled[:, None].expand(-1, horizon)
+                    ).reshape(-1)
+                )
             else:
                 flat_states = states.reshape(-1, states.shape[-1])
                 flat_actions = actions.reshape(-1)
@@ -1048,21 +1072,26 @@ class MATWMLearner:
                 flat_returns = fixed_returns.reshape(-1)
                 flat_advantage = fixed_advantage.reshape(-1)
                 flat_focal = focal[:, None].expand(-1, horizon).reshape(-1)
+                flat_controlled = None
             clip = getattr(self.args, "marie_ppo_clip", 0.2)
-            value_coefficient = getattr(self.args, "marie_value_coef", 0.5)
+            # Reference MARIE's value_loss already contains the 1/2 MSE
+            # factor and applies no additional PPO value coefficient.
+            value_coefficient = (
+                1.0 if original_marie
+                else getattr(self.args, "marie_value_coef", 0.5)
+            )
             epochs = getattr(self.args, "marie_ppo_epochs", 5)
             actor_losses, critic_losses, grad_norms = [], [], []
             for _ in range(epochs):
                 if original_marie:
-                    # Upstream shuffles the leading rollout dimension and
-                    # processes at most 2,000 agent samples per minibatch.
-                    # Shuffle team-time units here so centralized attention
-                    # always receives complete teams.
+                    # Upstream shuffles team-time samples and processes 2,000
+                    # complete teams per minibatch. Keep each team intact so
+                    # AugmentedCritic attention sees the same tensor layout.
                     unit_count = flat_states.shape[0] // self.n_agents
                     unit_order = th.randperm(
                         unit_count, device=flat_states.device
                     )
-                    units_per_minibatch = max(1, 2000 // self.n_agents)
+                    units_per_minibatch = 2000
                     minibatches = [
                         (unit_order[start:start + units_per_minibatch, None]
                          * self.n_agents
@@ -1088,18 +1117,26 @@ class MATWMLearner:
                         ratio.clamp(1.0 - clip, 1.0 + clip)
                         * flat_advantage[idx],
                     )
-                    actor_loss = -(
+                    actor_terms = (
                         surrogate
                         + entropy_coefficient * distribution.entropy()
-                    ).mean()
+                    )
                     new_values = self.policy.values(
                         flat_states[idx], flat_focal[idx]
                     ).squeeze(-1)
                     # Original StarCraft path uses an unclipped MSE/2 critic
                     # loss.
-                    critic_loss = 0.5 * (
+                    critic_terms = 0.5 * (
                         new_values - flat_returns[idx]
-                    ).pow(2).mean()
+                    ).pow(2)
+                    if flat_controlled is None:
+                        actor_loss = -actor_terms.mean()
+                        critic_loss = critic_terms.mean()
+                    else:
+                        loss_mask = flat_controlled[idx].to(actor_terms.dtype)
+                        denominator = loss_mask.sum().clamp_min(1.0)
+                        actor_loss = -(actor_terms * loss_mask).sum() / denominator
+                        critic_loss = (critic_terms * loss_mask).sum() / denominator
                     if self.separate_ppo_optimisers:
                         self.actor_optimiser.zero_grad()
                         actor_loss.backward()
@@ -1151,6 +1188,10 @@ class MATWMLearner:
                     continuations, 1
                 ).mean().item(),
                 "matwm_agent_grad_norm": sum(grad_norms) / len(grad_norms),
+                "marie_controlled_fraction": (
+                    1.0 if controlled is None
+                    else controlled.float().mean().item()
+                ),
             }
         actor_loss = -self._masked_mean(
             advantage * log_probs + entropy_coefficient * entropies, weights

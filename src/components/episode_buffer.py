@@ -354,7 +354,11 @@ class ReplayBuffer(EpisodeBatch):
             filled = int(
                 self.data.transition_data["filled"][episode].sum().item()
             )
-            stop = np.random.randint(1, filled + 1)
+            # EPyMARL also marks the observation after the terminal action as
+            # filled. The reference episodic MARIE buffer contains transition
+            # records only, so that final observation is not an endpoint.
+            transition_count = max(1, filled - 1)
+            stop = np.random.randint(1, transition_count + 1)
             start = stop - observation_length
             source_start = max(0, start)
             destination_start = source_start - start

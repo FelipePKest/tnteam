@@ -1,6 +1,8 @@
 import torch as th
 from torch.distributions import Categorical
+import os
 
+from modules.marie_checkpoint import load_reference_marie_checkpoint
 from modules.marie import MARIEPolicy
 
 
@@ -68,9 +70,12 @@ class MARIEMAC:
         th.save(self.policy.state_dict(), f"{path}/agent.th")
 
     def load_models(self, path):
-        self.policy.load_state_dict(
-            th.load(f"{path}/agent.th", map_location="cpu")
-        )
+        native_path = os.path.join(path, "agent.th")
+        if os.path.exists(native_path):
+            self.policy.load_state_dict(th.load(native_path, map_location="cpu"))
+            return
+        reference_path = os.path.join(path, "reference_marie.pt")
+        load_reference_marie_checkpoint(self.policy, reference_path)
 
 
 class _MARIEActionSelector:

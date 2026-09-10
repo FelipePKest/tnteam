@@ -136,7 +136,6 @@ def run_sequential(args, logger):
     is_world_model_learner = args.learner in {
         "matwm_learner", "marie_learner"
     }
-    is_reference_marie = args.learner == "marie_reference_learner"
     if is_world_model_learner:
         capacity_steps = getattr(args, "matwm_replay_capacity_steps", None)
         if capacity_steps is not None:
@@ -270,29 +269,37 @@ def run_sequential(args, logger):
         episode_batch, _ = runner.run(
             test_mode=False, step_callback=step_callback
         ) # batch_size_run eps collected
-        if is_reference_marie:
-            learner.train_episode(episode_batch, runner.t_env, episode)
-        else:
-            buffer.insert_episode_batch(episode_batch)
-        if is_reference_marie:
-            pass
-        elif canonical_marie:
-            marie_new_transitions += runner.env_steps_this_run
+        if canonical_marie:
             update_interval = getattr(args, "marie_new_samples_per_update", 100)
             minimum_replay = getattr(args, "marie_min_replay_steps", 1000)
-            if buffer.marie_transition_count() < minimum_replay:
-                # Upstream retains only enough credit for the first update;
-                # it does not execute a catch-up burst after replay warm-up.
-                marie_new_transitions = min(
-                    marie_new_transitions, update_interval
+            # The former reference adapter called learner.step once per
+            # episode, even when ParallelRunner returned several episodes.
+            # Insert and account for them in that same order so batch_size_run
+            # does not silently lower MARIE's update-to-data ratio.
+            for batch_index in range(episode_batch.batch_size):
+                filled = int(
+                    episode_batch["filled"][batch_index].sum().item()
                 )
-            if (
-                marie_new_transitions >= update_interval
-                and buffer.marie_transition_count() >= minimum_replay
-            ):
-                learner.train_from_replay(buffer, runner.t_env, episode)
-                marie_new_transitions = 0
+                episode_steps = max(0, filled - 1)
+                if episode_steps:
+                    # MARIE records the end of every collected episode as a
+                    # terminal boundary, including an environment time limit.
+                    episode_batch.data.transition_data["terminated"][
+                        batch_index, episode_steps - 1, 0
+                    ] = 1
+                buffer.insert_episode_batch(
+                    episode_batch[batch_index:batch_index + 1]
+                )
+                marie_new_transitions += episode_steps
+                if (
+                    marie_new_transitions >= update_interval
+                    and buffer.marie_transition_count() >= minimum_replay
+                ):
+                    learner.train_from_replay(buffer, runner.t_env, episode)
+                    # Reference MARIE resets rather than retaining overshoot.
+                    marie_new_transitions = 0
         elif use_batched_latent_ppo:
+            buffer.insert_episode_batch(episode_batch)
             policy_buffer.insert_episode_batch(episode_batch)
             policy_collections += 1
             if policy_buffer.can_sample(latent_ppo_batch_size):
@@ -323,7 +330,14 @@ def run_sequential(args, logger):
                     )
                 policy_buffer.clear()
                 policy_collections = 0
-        elif not interleaved_updates and buffer.can_sample(args.batch_size): # when batch_size eps collected
+        else:
+            buffer.insert_episode_batch(episode_batch)
+        if (
+            not canonical_marie
+            and not use_batched_latent_ppo
+            and not interleaved_updates
+            and buffer.can_sample(args.batch_size)
+        ): # when batch_size eps collected
             use_latent_ppo = (
                 is_world_model_learner
                 and getattr(args, "matwm_real_policy_algorithm", "awr") == "ppo"

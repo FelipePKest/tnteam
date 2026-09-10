@@ -11,14 +11,12 @@ x-training-common: &training-common
   init: true
   environment:
     SC2PATH: /workspace/tnteam/3rdparty/StarCraftII
-    MARIE_REFERENCE_ROOT: /workspace/MARIE
-    PYTHONPATH: /workspace/tnteam/src:/workspace/MARIE:/workspace/MARIE/agent/models
+    PYTHONPATH: /workspace/tnteam/src
     PYTHONUNBUFFERED: "1"
     PYTORCH_CUDA_ALLOC_CONF: max_split_size_mb:128
     WANDB_MODE: disabled
   volumes:
     - ${SC2_PATH:-./3rdparty/StarCraftII}:/workspace/tnteam/3rdparty/StarCraftII:ro
-    - ${MARIE_PATH:-../MARIE}:/workspace/MARIE:ro
     - ${UNCONTROLLED_PATH:-./uncntrl_agents}:/workspace/tnteam/uncntrl_agents:ro
     - ./naht_results:/workspace/tnteam/naht_results
     - ./3sv5z:/workspace/tnteam/3sv5z
@@ -39,8 +37,6 @@ services:
       - "1"
       - --uncontrolled-seed
       - "112358"
-      - --marie-reference-root
-      - /workspace/MARIE
 
   poam:
     <<: *training-common
