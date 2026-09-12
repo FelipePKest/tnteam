@@ -1,6 +1,7 @@
 """MARIE's staged tokenizer, world-model, and imagined policy training."""
 
 import os
+import time
 
 import torch as th
 import torch.nn as nn
@@ -472,10 +473,17 @@ class MARIELearner(MATWMLearner):
             batch.to(self.args.device)
         return batch
 
+    def _stage_time(self):
+        device = th.device(self.args.device)
+        if device.type == "cuda":
+            th.cuda.synchronize(device)
+        return time.perf_counter()
+
     def train_from_replay(self, replay, t_env, episode_num):
         """Run one canonical MARIE update event using fresh replay draws."""
         self.train_calls += 1
         self.marie_update_events += 1
+        started = self._stage_time()
         tokenizer_stats = []
         tokenizer_batch_size = getattr(
             self.args, "marie_tokenizer_batch_size", 256
@@ -486,6 +494,7 @@ class MARIELearner(MATWMLearner):
             )
             tokenizer_stats.append(self._train_tokenizer(batch))
 
+        tokenizer_finished = self._stage_time()
         world_stats = []
         if self.marie_update_events > getattr(
             self.args, "marie_world_warmup_events", 9
@@ -505,6 +514,7 @@ class MARIELearner(MATWMLearner):
         if averaged_world:
             self.last_world_stats = averaged_world
 
+        world_finished = self._stage_time()
         agent_stats = []
         if self.marie_update_events > getattr(
             self.args, "marie_policy_warmup_events", 19
@@ -522,6 +532,17 @@ class MARIELearner(MATWMLearner):
         averaged_agent = self._average_stats(agent_stats)
         if averaged_agent:
             self.last_agent_stats = averaged_agent
+
+        policy_finished = self._stage_time()
+        # Synchronize only at stage boundaries; include replay draws and
+        # transfers in each stage's wall time instead of timing GPU launches.
+        for key, seconds in {
+            "tokenizer": tokenizer_finished - started,
+            "world_model": world_finished - tokenizer_finished,
+            "imagined_policy": policy_finished - world_finished,
+            "total": policy_finished - started,
+        }.items():
+            self.logger.log_stat("marie_seconds_" + key, seconds, t_env)
 
         stats = {
             **self._average_stats(tokenizer_stats),

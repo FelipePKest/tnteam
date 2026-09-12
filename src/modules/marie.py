@@ -103,11 +103,14 @@ class CachedCausalTransformerLayer(nn.Module):
             cache = _FixedKVCache(key, value, max_cache_tokens)
             key, value = cache.get()
         past_length = key.shape[2] - length
-        scores = th.matmul(query, key.transpose(-2, -1)) * self.scale
-        query_index = th.arange(length, device=inputs.device)[:, None]
-        key_index = th.arange(key.shape[2], device=inputs.device)[None, :]
-        causal_mask = key_index > past_length + query_index
-        scores = scores.masked_fill(causal_mask, float("-inf"))
+        # A single cached query can attend to every retained key. SDPA's
+        # is_causal aligns to the upper left, so cached chunks need an offset.
+        allowed = None
+        causal = past_length == 0
+        if length > 1 and past_length > 0:
+            query_index = th.arange(length, device=inputs.device)[:, None]
+            key_index = th.arange(key.shape[2], device=inputs.device)[None, :]
+            allowed = key_index <= past_length + query_index
         if attention_mask is not None and cache is None:
             if attention_mask.dim() == 2:
                 allowed = th.isfinite(attention_mask)[
@@ -117,9 +120,26 @@ class CachedCausalTransformerLayer(nn.Module):
                 allowed = attention_mask[
                     :, None, :length, :key.shape[2]
                 ].bool()
-            scores = scores.masked_fill(~allowed, float("-inf"))
-        attention = self.attention_dropout(scores.softmax(-1))
-        update = th.matmul(attention, value).transpose(1, 2).reshape(
+            allowed = allowed & th.ones(
+                length, key.shape[2], dtype=th.bool, device=inputs.device
+            ).tril(diagonal=past_length)
+            causal = False
+        if hasattr(F, "scaled_dot_product_attention"):
+            update = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=allowed,
+                dropout_p=self.attention_dropout.p if self.training else 0.0,
+                is_causal=causal,
+            )
+        else:
+            scores = th.matmul(query, key.transpose(-2, -1)) * self.scale
+            if causal:
+                allowed = th.ones(
+                    length, key.shape[2], dtype=th.bool, device=inputs.device
+                ).tril()
+            if allowed is not None:
+                scores = scores.masked_fill(~allowed, float("-inf"))
+            update = th.matmul(self.attention_dropout(scores.softmax(-1)), value)
+        update = update.transpose(1, 2).reshape(
             batch, length, hidden_dim
         )
         output = inputs + self.residual_dropout(self.attention_output(update))
@@ -779,7 +799,7 @@ class MARIEWorldModel(MATWMWorldModel):
             ).sample()
             token = F.one_hot(index, self.n_categories).to(hidden.dtype)
             tokens.append(token)
-            embedded = self.embed_world_tokens(token).unsqueeze(1)
+            embedded = self.world_token_embedding(index).unsqueeze(1)
             cached_length = cache[0][0].shape[2]
             retained_length = min(cached_length, max_tokens - 1)
             embedded = embedded + self.position[
