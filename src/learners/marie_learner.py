@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from torch.optim import Adam, AdamW
 
 from learners.matwm_learner import MATWMLearner
+from modules.marie_convergence import ModelConvergence
+from components.episode_buffer import EpisodeBatch
 
 
 class MARIELearner(MATWMLearner):
@@ -87,13 +89,45 @@ class MARIELearner(MATWMLearner):
                 **optimiser_kwargs,
             )
         self.marie_update_events = 0
+        self.adaptive_model_updates = getattr(args, "marie_adaptive_model_updates", False)
+        self.model_update_interval = int(getattr(args, "marie_reduced_model_interval", 5))
+        self.model_update_win_rate = float(getattr(args, "marie_model_win_rate_threshold", 0.25))
+        self.model_update_patience = int(getattr(args, "marie_model_threshold_evaluations", 3))
+        if self.model_update_interval < 1 or self.model_update_patience < 1:
+            raise ValueError("MARIE update interval and evaluation patience must be positive")
+        if not 0 <= self.model_update_win_rate <= 1:
+            raise ValueError("MARIE win-rate threshold must be between zero and one")
+        self.model_threshold_streak = 0
+        self.model_reduced_since = None
+        self.model_last_eval_t = None
+        self.convergence = None
+        self.convergence_batches = None
+        if getattr(args, "marie_convergence_stop", False):
+            if self.adaptive_model_updates:
+                raise ValueError("Choose convergence stopping or win-rate scheduling, not both")
+            self.convergence = ModelConvergence(
+                window=getattr(args, "marie_convergence_window", 3),
+                patience=getattr(args, "marie_convergence_patience", 2),
+                parameter_tolerance=getattr(args, "marie_convergence_parameter_tolerance", 0.01),
+                validation_tolerance=getattr(args, "marie_convergence_validation_tolerance", 0.02),
+                min_events=getattr(args, "marie_convergence_min_events", 20),
+            )
+        self.policy_only = getattr(args, "marie_policy_only", False)
+        if self.policy_only:
+            self.world_model.requires_grad_(False)
+            self.world_model.eval()
 
     def _train_tokenizer(self, batch):
         self.world_model.encoder.train()
         observation = batch["obs"]
         valid = batch["filled"].squeeze(-1).bool()
-        valid = valid[:, :, None].expand(-1, -1, self.n_agents)
         observation = observation[valid]
+        # Bound team timesteps, never individual agents within those teams.
+        team_batch_size = getattr(self.args, "marie_tokenizer_batch_size", 256)
+        if observation.shape[0] > team_batch_size:
+            indices = th.randperm(observation.shape[0], device=observation.device)[:team_batch_size]
+            observation = observation[indices]
+        observation = observation.reshape(-1, batch["obs"].shape[-1])
         if observation.numel() == 0:
             self.world_model.encoder.eval()
             return {
@@ -104,12 +138,8 @@ class MARIELearner(MATWMLearner):
                 "marie_tokenizer_active_codes": 0.0,
                 "marie_tokenizer_grad_norm": 0.0,
             }
-        batch_size = getattr(self.args, "marie_tokenizer_batch_size", 64)
-        if observation.shape[0] > batch_size:
-            indices = th.randperm(
-                observation.shape[0], device=observation.device
-            )[:batch_size]
-            observation = observation[indices]
+        # Replay already samples marie_tokenizer_batch_size team observations.
+        # Keep every agent: 256 teams on 3s_vs_5z means 768 observations.
         latent, logits = self.world_model.encode(observation, sample=True)
         reconstruction = self.world_model.decode(latent)
         reconstruction_loss = (reconstruction - observation).abs().mean()
@@ -137,6 +167,17 @@ class MARIELearner(MATWMLearner):
             "marie_tokenizer_grad_norm": float(grad_norm),
         }
 
+    def _train_agents(self, batch):
+        # no_grad alone does not disable dropout. Imagination must use the
+        # inference-mode dynamics, as in upstream MARIE.
+        modes = [(module, module.training) for module in self.world_model.modules()]
+        self.world_model.eval()
+        try:
+            return super()._train_agents(batch)
+        finally:
+            for module, training in modes:
+                module.training = training
+
     def _train_world_model(self, batch, validate_rollout=False):
         """Train the four prediction heads used by upstream MARIE.
 
@@ -145,6 +186,9 @@ class MARIELearner(MATWMLearner):
         world-model loss.  MARIE freezes its VQ tokenizer and learns next VQ
         codes, reward, continuation and the available-action mask.
         """
+        # Enable regularization only for supervised world-model optimization.
+        self.world_model.train()
+        self.world_model.encoder.eval()
         tokenizer_parameters = (
             list(self.world_model.encoder.parameters())
             + list(self.world_model.decoder.parameters())
@@ -449,6 +493,7 @@ class MARIELearner(MATWMLearner):
                 )
             return stats
         finally:
+            self.world_model.eval()
             for parameter, requires_grad in zip(tokenizer_parameters, previous):
                 parameter.requires_grad_(requires_grad)
 
@@ -473,6 +518,180 @@ class MARIELearner(MATWMLearner):
             batch.to(self.args.device)
         return batch
 
+    def observe_evaluation(self, win_rate, t_env):
+        """Latch a slower model schedule after consecutive qualifying evaluations."""
+        if not self.adaptive_model_updates or self.policy_only:
+            return
+        if self.model_last_eval_t == t_env:
+            return
+        self.model_last_eval_t = t_env
+        if self.model_reduced_since is None:
+            self.model_threshold_streak = (
+                self.model_threshold_streak + 1
+                if win_rate >= self.model_update_win_rate else 0
+            )
+            if self.model_threshold_streak >= self.model_update_patience:
+                self.model_reduced_since = self.marie_update_events
+                console = getattr(self.logger, "console_logger", None)
+                if console is not None:
+                    console.info(
+                        "MARIE model schedule reduced at t_env=%s: win rate %.3f "
+                        "met %.3f for %s evaluations; tokenizer/WM every %s events",
+                        t_env, win_rate, self.model_update_win_rate,
+                        self.model_update_patience, self.model_update_interval,
+                    )
+        self.logger.log_stat("marie_model_threshold_streak", self.model_threshold_streak, t_env)
+        self.logger.log_stat("marie_model_update_interval", self._model_interval(), t_env)
+
+    def _model_interval(self):
+        if self.adaptive_model_updates and self.model_reduced_since is not None:
+            return self.model_update_interval
+        return 1
+
+    def _update_model_this_event(self):
+        if self.policy_only:
+            return False
+        if self._model_interval() == 1:
+            return True
+        return (self.marie_update_events - self.model_reduced_since) % self.model_update_interval == 0
+
+    def observe_model_convergence(self, batches, t_env):
+        if self.convergence is None or self.policy_only:
+            return
+        if self.convergence_batches is None:
+            # Keep the first held-out episodes fixed for comparable measurements.
+            # Store plain tensor dictionaries so they can be checkpointed portably.
+            self.convergence_batches = []
+            for batch in batches:
+                self.convergence_batches.append({
+                    "scheme": {k:v for k,v in batch.scheme.items() if k != "filled"},
+                    "groups": batch.groups, "batch_size": batch.batch_size,
+                    "max_seq_length": batch.max_seq_length,
+                    "transitions": {k:v.detach().cpu().clone() for k,v in batch.data.transition_data.items()},
+                    "episodes": {k:v.detach().cpu().clone() for k,v in batch.data.episode_data.items()},
+                })
+        fixed = []
+        for saved in self.convergence_batches:
+            batch = EpisodeBatch(saved["scheme"], saved["groups"], saved["batch_size"], saved["max_seq_length"])
+            batch.data.transition_data = saved["transitions"]
+            batch.data.episode_data = saved["episodes"]
+            fixed.append(batch)
+        stats = self.validate_world_model(fixed, t_env, prefix="marie_fixed_validation")
+        keys = ["tokenizer_reconstruction_mae"] + [
+            "h%d/%s" % (h, metric) for h in (1, 5, 15)
+            for metric in ("observation_mae", "reward_mae", "return_mae")
+        ]
+        if any("marie_fixed_validation/"+key not in stats for key in keys):
+            return  # insufficient held-out horizon; never infer convergence
+        metrics = {key: stats["marie_fixed_validation/"+key] for key in keys}
+        diagnostics, frozen = self.convergence.observe(
+            ModelConvergence.snapshot(self.world_model), metrics, self.marie_update_events)
+        for key, value in diagnostics.items():
+            self.logger.log_stat("marie_convergence/"+key, value, t_env)
+        if frozen:
+            self.policy_only = True
+            self.world_model.requires_grad_(False)
+            self.world_model.eval()
+            self.logger.console_logger.info(
+                "MARIE convergence plateau at t_env=%s: freezing tokenizer and world model; "
+                "continuing agent-only training. This is a heuristic plateau, not proof of optimality.", t_env)
+
+    @th.no_grad()
+    def validate_world_model(self, batches, t_env, prefix="marie_validation"):
+        """Open-loop predictions on fresh evaluation episodes, never replayed.
+
+        Follow recorded actions with the same cached stochastic dynamics used
+        by policy imagination. Report each horizon separately; no universal
+        sufficiency threshold is assumed. Preserve training RNG and modes.
+        """
+        modes = [(module, module.training) for module in self.world_model.modules()]
+        records = {h: [] for h in (1, 5, 15)}
+        reconstruction_errors = []
+        device = next(self.world_model.parameters()).device
+        devices = [device.index or 0] if device.type == "cuda" else []
+        try:
+            self.world_model.eval()
+            with th.random.fork_rng(devices=devices):
+                th.manual_seed(1729)
+                for batch in batches:
+                    for episode in range(batch.batch_size):
+                        length = int(batch["filled"][episode].sum().item()) - 1
+                        if length < 1:
+                            continue
+                        # Cover beginnings, middles and terminal boundaries.
+                        width = min(15, length)
+                        starts = sorted(set((0, (length-width)//2, length-width)))
+                        for start in starts:
+                            obs = batch["obs"][episode, start:start+width+1].to(device)
+                            actions = batch["actions"][episode, start:start+width].to(device)
+                            rewards = batch["reward"][episode, start:start+width].to(device)
+                            done = batch["terminated"][episode, start:start+width].to(device)
+                            avail = batch["avail_actions"][episode, start:start+width+1].to(device)
+                            target, _ = self.world_model.encode(obs.transpose(0, 1), sample=False)
+                            reconstruction_errors.append((
+                                self.world_model.decode(target) - obs.transpose(0, 1)
+                            ).abs().mean().item())
+                            latent = target[:, :1]
+                            focal = th.arange(self.n_agents, device=device)
+                            cache = None
+                            predicted_return = th.zeros(self.n_agents, 1, device=device)
+                            real_return = th.zeros_like(predicted_return)
+                            for step in range(width):
+                                action = actions[step][:, None]
+                                if cache is None:
+                                    hidden, cache = self.world_model.init_dynamics_cache(latent, action, focal)
+                                    hidden = hidden[:, -1]
+                                else:
+                                    hidden, cache = self.world_model.append_action_cache(latent, action, focal, cache)
+                                heads = self.world_model.prediction_heads(hidden, latent[:, -1])
+                                reward = self.world_model.reward_value(heads["reward_ensemble_logits"][0])
+                                predicted_return += reward
+                                real_return += rewards[step]
+                                terminal = heads["continuation_logits"].sigmoid() < 0.5
+                                terminal_target = done[step].bool().expand_as(terminal)
+                                availability = self.world_model.predicted_availability_from_hidden(hidden)
+                                next_latent, _, cache = self.world_model.sample_next_latent_cached(hidden, cache)
+                                horizon = step + 1
+                                if horizon in records:
+                                    records[horizon].append({
+                                        "observation_mae": (self.world_model.decode(next_latent)-obs[horizon]).abs().mean().item(),
+                                        "token_accuracy": (next_latent.argmax(-1)==target[:, horizon].argmax(-1)).float().mean().item(),
+                                        "reward_mae": (reward-rewards[step]).abs().mean().item(),
+                                        "return_mae": (predicted_return-real_return).abs().mean().item(),
+                                        "availability_accuracy": (availability.bool()==avail[horizon].bool()).float().mean().item(),
+                                        "terminal_tp": (terminal & terminal_target).sum().item(),
+                                        "terminal_predicted": terminal.sum().item(),
+                                        "terminal_actual": terminal_target.sum().item(),
+                                    })
+                                latent = next_latent[:, None]
+        finally:
+            for module, training in modes:
+                module.training = training
+        result = {}
+        base_prefix = prefix
+        if reconstruction_errors:
+            result[base_prefix+"/tokenizer_reconstruction_mae"] = sum(reconstruction_errors)/len(reconstruction_errors)
+        for horizon, rows in records.items():
+            if not rows:
+                continue
+            prefix = base_prefix + "/h%d/" % horizon
+            for key in rows[0]:
+                if not key.startswith("terminal_"):
+                    result[prefix+key] = sum(row[key] for row in rows)/len(rows)
+            tp = sum(row["terminal_tp"] for row in rows)
+            predicted = sum(row["terminal_predicted"] for row in rows)
+            actual = sum(row["terminal_actual"] for row in rows)
+            result[prefix+"terminal_actual"] = actual
+            result[prefix+"terminal_predicted"] = predicted
+            if predicted:
+                result[prefix+"terminal_precision"] = tp/predicted
+            if actual:
+                result[prefix+"terminal_recall"] = tp/actual
+            result[prefix+"windows"] = len(rows)
+        for key, value in result.items():
+            self.logger.log_stat(key, value, t_env)
+        return result
+
     def _stage_time(self):
         device = th.device(self.args.device)
         if device.type == "cuda":
@@ -483,12 +702,15 @@ class MARIELearner(MATWMLearner):
         """Run one canonical MARIE update event using fresh replay draws."""
         self.train_calls += 1
         self.marie_update_events += 1
+        update_model = self._update_model_this_event()
+        self.logger.log_stat("marie_model_updated", int(update_model), t_env)
+        self.logger.log_stat("marie_model_update_interval", self._model_interval(), t_env)
         started = self._stage_time()
         tokenizer_stats = []
         tokenizer_batch_size = getattr(
             self.args, "marie_tokenizer_batch_size", 256
         )
-        for _ in range(getattr(self.args, "marie_tokenizer_epochs", 200)):
+        for _ in range(0 if not update_model else getattr(self.args, "marie_tokenizer_epochs", 200)):
             batch = self._replay_batch(
                 replay, tokenizer_batch_size, 0, "tokenizer"
             )
@@ -496,7 +718,7 @@ class MARIELearner(MATWMLearner):
 
         tokenizer_finished = self._stage_time()
         world_stats = []
-        if self.marie_update_events > getattr(
+        if update_model and self.marie_update_events > getattr(
             self.args, "marie_world_warmup_events", 9
         ):
             world_epochs = getattr(self.args, "marie_world_epochs", 200)
@@ -557,13 +779,16 @@ class MARIELearner(MATWMLearner):
     def train(self, batch, t_env, episode_num):
         self.train_calls += 1
         self.marie_update_events += 1
+        update_model = self._update_model_this_event()
+        self.logger.log_stat("marie_model_updated", int(update_model), t_env)
+        self.logger.log_stat("marie_model_update_interval", self._model_interval(), t_env)
         tokenizer_stats = [
             self._train_tokenizer(batch)
-            for _ in range(getattr(self.args, "marie_tokenizer_epochs", 1))
+            for _ in range(0 if not update_model else getattr(self.args, "marie_tokenizer_epochs", 1))
         ]
 
         world_stats = []
-        if self.marie_update_events > getattr(
+        if update_model and self.marie_update_events > getattr(
             self.args, "marie_world_warmup_events", 0
         ):
             world_stats = [
@@ -609,6 +834,11 @@ class MARIELearner(MATWMLearner):
             {
                 "marie_update_events": self.marie_update_events,
                 "train_calls": self.train_calls,
+                "model_threshold_streak": self.model_threshold_streak,
+                "model_reduced_since": self.model_reduced_since,
+                "model_last_eval_t": self.model_last_eval_t,
+                "convergence": self.convergence.state_dict() if self.convergence else None,
+                "convergence_batches": self.convergence_batches,
             },
             os.path.join(path, "marie_training_state.th"),
         )
@@ -631,3 +861,14 @@ class MARIELearner(MATWMLearner):
             state = th.load(state_path, map_location="cpu")
             self.marie_update_events = state.get("marie_update_events", 0)
             self.train_calls = state.get("train_calls", 0)
+            self.model_threshold_streak = state.get("model_threshold_streak", 0)
+            self.model_reduced_since = state.get("model_reduced_since")
+            self.model_last_eval_t = state.get("model_last_eval_t")
+
+            if self.convergence is not None and state.get("convergence") is not None:
+                self.convergence.load_state_dict(state["convergence"])
+                self.convergence_batches = state.get("convergence_batches")
+                if self.convergence.frozen:
+                    self.policy_only = True
+                    self.world_model.requires_grad_(False)
+                    self.world_model.eval()

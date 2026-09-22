@@ -185,6 +185,9 @@ def run_sequential(args, logger):
         if args.use_cuda:
             learner.cuda()
 
+    if getattr(args, "marie_policy_only", False) and not args.checkpoint_path:
+        raise ValueError("Policy-only MARIE requires a trained checkpoint")
+
     if args.checkpoint_path != "":
         model_path, timestep_to_load = find_model_path(args.checkpoint_path, args.load_step, logger=logger)
         logger.console_logger.info(f"Loading model from ts {timestep_to_load}, {model_path}")
@@ -425,6 +428,13 @@ def run_sequential(args, logger):
                 test_batch, mean_test_return = runner.run(test_mode=True)
                 test_batches.append(test_batch)
 
+            if getattr(args, "marie_validate_heldout", False):
+                validation = learner.validate_world_model(test_batches, runner.t_env)
+                logger.console_logger.info("Held-out world-model validation: %s", validation)
+
+            if getattr(args, "marie_convergence_stop", False):
+                learner.observe_model_convergence(test_batches, runner.t_env)
+
             # Evaluate classifier on test episodes (if learner supports it)
             if hasattr(learner, 'test') and test_batches:
                 # Test on each batch and average
@@ -445,6 +455,8 @@ def run_sequential(args, logger):
             # save best checkpoint
             assert mean_test_return is not None
             test_win_rate = getattr(runner, "last_test_battle_won", -1.0)
+            if hasattr(learner, "observe_evaluation"):
+                learner.observe_evaluation(test_win_rate, runner.t_env)
             marie_selection = getattr(args, "marie_original_procedure", False)
             is_better = (
                 (test_win_rate, mean_test_return)

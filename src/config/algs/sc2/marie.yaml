@@ -110,3 +110,22 @@ marie_actor_critic_eps: 0.00000001
 marie_actor_critic_weight_decay: 0.00001
 test_interval: 10000
 test_nepisode: 8
+
+# Opt-in checkpointed policy-only experiment. Evaluation episodes never enter replay.
+marie_policy_only: False
+marie_validate_heldout: False
+
+# Keep full model updates until this real-evaluation performance is sustained.
+# Once reached, the reduced frequency stays active; policy updates are unchanged.
+marie_adaptive_model_updates: False
+marie_model_win_rate_threshold: 0.25
+marie_model_threshold_evaluations: 3
+marie_reduced_model_interval: 5
+
+# Heuristic model convergence: fixed held-out validation + relative parameter motion.
+marie_convergence_stop: False
+marie_convergence_window: 3
+marie_convergence_patience: 2
+marie_convergence_parameter_tolerance: 0.01
+marie_convergence_validation_tolerance: 0.02
+marie_convergence_min_events: 20
