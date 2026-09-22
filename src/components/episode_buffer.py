@@ -215,6 +215,7 @@ class ReplayBuffer(EpisodeBatch):
         self.buffer_size = buffer_size  # same as self.batch_size but more explicit
         self.buffer_index = 0
         self.episodes_in_buffer = 0
+        self._marie_candidate_cache = {}
         self.marie_sample_visits = {
             "tokenizer": th.zeros(
                 buffer_size, max_seq_length, dtype=th.long, device="cpu"
@@ -225,6 +226,8 @@ class ReplayBuffer(EpisodeBatch):
         }
 
     def insert_episode_batch(self, ep_batch):
+        # Episode lengths/slots may change, including on circular overwrite.
+        self._marie_candidate_cache.clear()
         if self.buffer_index + ep_batch.batch_size <= self.buffer_size:
             inserted = slice(
                 self.buffer_index, self.buffer_index + ep_batch.batch_size
@@ -253,16 +256,18 @@ class ReplayBuffer(EpisodeBatch):
         )
 
     def _marie_candidates(self, sequence_length):
-        candidates = []
-        for episode in range(self.episodes_in_buffer):
-            filled = int(
-                self.data.transition_data["filled"][episode].sum().item()
-            )
-            # A sequence with L transitions requires L+1 observations.
-            last_start = filled - sequence_length - 1
-            for start in range(max(0, last_start + 1)):
-                candidates.append((episode, start))
-        return candidates
+        cached = self._marie_candidate_cache.get(sequence_length)
+        if cached is None:
+            filled = self.data.transition_data["filled"][:self.episodes_in_buffer]
+            lengths = filled.sum(dim=(1, 2)).cpu().numpy().astype(np.int64)
+            counts = np.maximum(0, lengths - sequence_length)
+            episodes = np.repeat(np.arange(self.episodes_in_buffer), counts)
+            offsets = np.repeat(np.cumsum(counts) - counts, counts)
+            starts = np.arange(int(counts.sum())) - offsets
+            # Preserve the original episode-major, start-major order exactly.
+            cached = np.column_stack((episodes, starts))
+            self._marie_candidate_cache[sequence_length] = cached
+        return cached
 
     def can_sample_marie(self, batch_size, sequence_length):
         return len(self._marie_candidates(sequence_length)) >= batch_size
@@ -289,16 +294,11 @@ class ReplayBuffer(EpisodeBatch):
                     len(candidates), batch_size
                 )
             )
-        visits = None
-        if mode == "policy":
-            # The upstream episode dataset draws actor contexts uniformly and
-            # does not share tokenizer/world-model visit counters.
-            probabilities = None
-        else:
-            visits = np.asarray([
-                int(self.marie_sample_visits[mode][episode, start])
-                for episode, start in candidates
-            ], dtype=np.float64)
+        # Counters live on CPU. Gather all candidate visits in one operation,
+        # avoiding tens of thousands of Python/Torch scalar conversions per draw.
+        episodes, starts = candidates.T
+        visit_array = self.marie_sample_visits[mode].numpy()
+        visits = visit_array[episodes, starts].astype(np.float64)
         if visits is not None and (
             temperature == "inf" or temperature == float("inf")
         ):
@@ -322,17 +322,16 @@ class ReplayBuffer(EpisodeBatch):
             result_scheme, self.groups, batch_size, sequence_length + 1,
             preprocess=None, device=self.device,
         )
-        for output, candidate_index in enumerate(selected):
-            episode, start = candidates[candidate_index]
-            stop = start + sequence_length + 1
-            for key, value in self.data.transition_data.items():
-                result.data.transition_data[key][output] = value[
-                    episode, start:stop
-                ]
-            for key, value in self.data.episode_data.items():
-                result.data.episode_data[key][output] = value[episode]
-            if mode != "policy":
-                self.marie_sample_visits[mode][episode, start] += 1
+        sampled = candidates[selected]
+        episode_index = th.as_tensor(sampled[:, 0], device=self.device)
+        time_index = th.as_tensor(sampled[:, 1], device=self.device)[:, None]
+        time_index = time_index + th.arange(sequence_length + 1, device=self.device)
+        for key, value in self.data.transition_data.items():
+            result.data.transition_data[key].copy_(value[episode_index[:, None], time_index])
+        for key, value in self.data.episode_data.items():
+            result.data.episode_data[key].copy_(value[episode_index])
+        # Selection is without replacement, so each (episode, start) is unique.
+        visit_array[sampled[:, 0], sampled[:, 1]] += 1
         return result
 
     def _sample_marie_policy(self, batch_size, observation_length):
