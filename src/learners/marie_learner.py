@@ -17,6 +17,8 @@ class MARIELearner(MATWMLearner):
     """EPyMARL adapter for the training schedule used by official MARIE."""
 
     def __init__(self, mac, scheme, logger, args):
+        # Opt-in TF32 for CUDA matrix multiplication; keep existing precision by default.
+        th.backends.cuda.matmul.allow_tf32 = bool(getattr(args, "marie_allow_tf32", False))
         super().__init__(mac, scheme, logger, args)
         tokenizer_parameters = (
             list(self.world_model.encoder.parameters())

@@ -129,3 +129,6 @@ marie_convergence_patience: 2
 marie_convergence_parameter_tolerance: 0.01
 marie_convergence_validation_tolerance: 0.02
 marie_convergence_min_events: 20
+
+# Opt-in Ampere+ Tensor Core acceleration for float32 matrix multiplication.
+marie_allow_tf32: False
