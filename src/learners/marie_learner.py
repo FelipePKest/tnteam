@@ -90,6 +90,7 @@ class MARIELearner(MATWMLearner):
                 lr=getattr(args, "matwm_ppo_critic_lr", 5e-4),
                 **optimiser_kwargs,
             )
+        self.set_optimizer_foreach(getattr(args, "marie_optimizer_foreach", False))
         self.marie_update_events = 0
         self.adaptive_model_updates = getattr(args, "marie_adaptive_model_updates", False)
         self.model_update_interval = int(getattr(args, "marie_reduced_model_interval", 5))
@@ -826,6 +827,16 @@ class MARIELearner(MATWMLearner):
                 self.logger.log_stat(key, value, t_env)
             self.last_log_t = t_env
 
+    def set_optimizer_foreach(self, enabled):
+        """Apply runtime optimizer grouping, including to restored parameter groups."""
+        for name in ("tokenizer_optimiser", "world_optimiser", "agent_optimiser",
+                     "actor_optimiser", "critic_optimiser"):
+            optimizer = getattr(self, name, None)
+            if optimizer is not None:
+                optimizer.defaults["foreach"] = bool(enabled)
+                for group in optimizer.param_groups:
+                    group["foreach"] = bool(enabled)
+
     def save_models(self, path):
         super().save_models(path)
         th.save(
@@ -874,3 +885,5 @@ class MARIELearner(MATWMLearner):
                     self.policy_only = True
                     self.world_model.requires_grad_(False)
                     self.world_model.eval()
+
+        self.set_optimizer_foreach(getattr(self.args, "marie_optimizer_foreach", False))

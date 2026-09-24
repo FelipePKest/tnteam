@@ -135,3 +135,7 @@ marie_allow_tf32: False
 
 # Group optimizer operations across tensors; opt-in pending benchmarking.
 marie_optimizer_foreach: False
+
+# Checkpoint resume options for the shared training loop.
+load_step: last
+resume_t_env_from_checkpoint: False
