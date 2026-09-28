@@ -56,6 +56,7 @@ class CachedCausalTransformerLayer(nn.Module):
         super().__init__()
         if hidden_dim % heads:
             raise ValueError("Transformer hidden dimension must divide attention heads")
+        self.manual_inference_attention = True
         self.heads = heads
         self.head_dim = hidden_dim // heads
         self.scale = self.head_dim ** -0.5
@@ -124,7 +125,14 @@ class CachedCausalTransformerLayer(nn.Module):
                 length, key.shape[2], dtype=th.bool, device=inputs.device
             ).tril(diagonal=past_length)
             causal = False
-        if hasattr(F, "scaled_dot_product_attention"):
+        # PyTorch 2.5's FP32 efficient-SDPA backend is substantially slower
+        # for MARIE's incremental inference shapes. Keep SDPA for gradients
+        # and mixed precision, where the fused kernels have different costs.
+        manual_inference = (
+            self.manual_inference_attention and not self.training
+            and not th.is_grad_enabled() and query.dtype == th.float32
+        )
+        if hasattr(F, "scaled_dot_product_attention") and not manual_inference:
             update = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=allowed,
                 dropout_p=self.attention_dropout.p if self.training else 0.0,
@@ -381,6 +389,10 @@ class MARIEWorldModel(MATWMWorldModel):
             getattr(args, "matwm_transformer_layers", 2),
             getattr(args, "matwm_dropout", 0.0),
         )
+        for layer in self.sequence_model.layers:
+            layer.manual_inference_attention = getattr(
+                args, "marie_manual_inference_attention", True
+            )
         token_embed_dim = getattr(args, "marie_token_embed_dim", 128)
         tokenizer_hidden = getattr(args, "marie_tokenizer_hidden_dim", 512)
         self.encoder = MARIEVQTokenizer(
@@ -942,11 +954,17 @@ class MARIEPolicy(MATWMPolicy):
         else:
             # Execution and imagined learning must consume the same tokenizer
             # reconstruction distribution used by upstream MARIE.
-            with th.no_grad():
-                obs_latent, _ = self.world_model.encode(
-                    observation, sample=False
-                )
-                observation = self.world_model.decode(obs_latent)
+            observation = self.reconstruct_observations(observation)
+        return self.build_state_from_reconstructed(observation)
+
+    @th.no_grad()
+    def reconstruct_observations(self, observation):
+        """Reconstruct each frame independently with the frozen tokenizer."""
+        obs_latent, _ = self.world_model.encode(observation, sample=False)
+        return self.world_model.decode(obs_latent)
+
+    def build_state_from_reconstructed(self, observation):
+        """Format already-reconstructed frames without another tokenizer pass."""
         # MAWorldModelEnv clamps decoded SMAC observations before both acting
         # and critic evaluation.
         observation = observation.clamp(-1.0, 1.0)

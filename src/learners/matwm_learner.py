@@ -794,6 +794,11 @@ class MATWMLearner:
         original_marie = getattr(
             self.args, "marie_original_procedure", False
         )
+        imagined_ppo = getattr(self.args, "marie_imagined_ppo", False)
+        use_ema_bootstrap = getattr(self.args, "matwm_ema_bootstrap", True)
+        need_ema_values = use_ema_bootstrap or (
+            not imagined_ppo and getattr(self.args, "matwm_critic_ema_coef", 1.0) != 0
+        )
         controlled = None
         trainable = batch.data.transition_data.get("trainable_agents")
         if original_marie and trainable is not None:
@@ -842,6 +847,19 @@ class MATWMLearner:
                 action_history = dynamics_actions
             teammate = self.world_model.teammate_logits(latent_history)[:, -1]
         imagined_observations = observations
+        cache_policy_observations = (
+            original_marie and getattr(self.args, "marie_cache_policy_observations", True)
+            and getattr(self.args, "marie_stack_obs", 0)
+            and hasattr(self.policy, "reconstruct_observations")
+        )
+        # This cache belongs only to this rollout. Tokenizer weights and its
+        # codebook cannot change before the rollout finishes.
+        reconstructed_observations = None
+        if cache_policy_observations:
+            reconstructed_observations = self.policy.reconstruct_observations(
+                observations
+            )[:, -self.policy.stack_obs:]
+
 
         log_probs, entropies, values, ema_values = [], [], [], []
         rollout_states, rollout_actions, rollout_available = [], [], []
@@ -850,135 +868,167 @@ class MATWMLearner:
         survival = observations.new_ones(observations.shape[0], 1)
         weights = []
 
-        for _ in range(horizon):
-            state = self.policy.build_state(
-                latent_history[:, -1], hidden, teammate, focal,
-                imagined_observations
-                if getattr(self.args, "marie_stack_obs", 0) else None,
-            ).detach()
-            logits = self.policy.actor_logits(state, focal)
-            with th.no_grad():
-                available = (
-                    imagined_available
-                    if original_marie else
-                    self.world_model.predicted_availability(
-                        latent_history[:, -1]
+        # PPO differentiates fresh evaluations below; rollout tensors are
+        # targets only. Preserve gradients for the alternative actor-critic loss.
+        with th.set_grad_enabled(th.is_grad_enabled() and not imagined_ppo):
+            for _ in range(horizon):
+                if cache_policy_observations:
+                    state = self.policy.build_state_from_reconstructed(
+                        reconstructed_observations
+                    ).detach()
+                else:
+                    state = self.policy.build_state(
+                        latent_history[:, -1], hidden, teammate, focal,
+                        imagined_observations
+                        if getattr(self.args, "marie_stack_obs", 0) else None,
+                    ).detach()
+                logits = self.policy.actor_logits(state, focal)
+                with th.no_grad():
+                    available = (
+                        imagined_available
+                        if original_marie else
+                        self.world_model.predicted_availability(
+                            latent_history[:, -1]
+                        )
                     )
-                )
-            logits = logits.masked_fill(~available, -1e9)
-            distribution = Categorical(logits=logits)
-            action = distribution.sample()
+                logits = logits.masked_fill(~available, -1e9)
+                distribution = Categorical(logits=logits)
+                action = distribution.sample()
 
-            rollout_states.append(state)
-            rollout_actions.append(action)
-            rollout_available.append(available)
-            log_probs.append(distribution.log_prob(action).unsqueeze(-1))
-            entropies.append(distribution.entropy().unsqueeze(-1))
-            values.append(self.policy.values(state, focal))
-            with th.no_grad():
-                ema_values.append(self.policy.values(state, focal, ema=True))
-            if not original_marie:
-                weights.append(survival)
-            with th.no_grad():
-                next_actions = action[:, None, None]
-                if getattr(self.args, "matwm_joint_action_dynamics", False):
-                    next_actions = self.policy.predicted_joint_actions(
-                        latent_history[:, -1:], focal, next_actions
-                    )
-                action_history = th.cat((action_history, next_actions), dim=1)
-                if use_dynamics_cache and dynamics_cache is None:
-                    hidden_sequence, dynamics_cache = (
-                        self.world_model.init_dynamics_cache(
-                            latent_history[:, -1:], next_actions, focal
+                rollout_states.append(state)
+                rollout_actions.append(action)
+                rollout_available.append(available)
+                log_probs.append(distribution.log_prob(action).unsqueeze(-1))
+                if not imagined_ppo:
+                    entropies.append(distribution.entropy().unsqueeze(-1))
+                values.append(self.policy.values(state, focal))
+                if need_ema_values:
+                    with th.no_grad():
+                        ema_values.append(self.policy.values(state, focal, ema=True))
+                if not original_marie:
+                    weights.append(survival)
+                with th.no_grad():
+                    next_actions = action[:, None, None]
+                    if getattr(self.args, "matwm_joint_action_dynamics", False):
+                        next_actions = self.policy.predicted_joint_actions(
+                            latent_history[:, -1:], focal, next_actions
                         )
-                    )
-                elif use_dynamics_cache and original_marie:
-                    hidden, dynamics_cache = (
-                        self.world_model.append_action_cache(
-                            latent_history[:, -1:], next_actions, focal,
-                            dynamics_cache,
+                    action_history = th.cat((action_history, next_actions), dim=1)
+                    if use_dynamics_cache and dynamics_cache is None:
+                        hidden_sequence, dynamics_cache = (
+                            self.world_model.init_dynamics_cache(
+                                latent_history[:, -1:], next_actions, focal
+                            )
                         )
-                    )
-                    hidden_sequence = hidden[:, None]
-                elif use_dynamics_cache:
-                    hidden_sequence, dynamics_cache = (
-                        self.world_model.append_dynamics_cache(
-                            latent_history[:, -1:], next_actions, focal,
-                            dynamics_cache,
+                    elif use_dynamics_cache and original_marie:
+                        hidden, dynamics_cache = (
+                            self.world_model.append_action_cache(
+                                latent_history[:, -1:], next_actions, focal,
+                                dynamics_cache,
+                            )
                         )
-                    )
-                else:
-                    hidden_sequence = self.world_model.dynamics_sequence(
-                        latent_history, action_history, focal
-                    )
-                hidden = hidden_sequence[:, -1]
-                heads = self.world_model.prediction_heads(
-                    hidden, latent_history[:, -1]
-                )
-                reward_predictions = th.stack([
-                    self.world_model.reward_value(logits)
-                    for logits in heads["reward_ensemble_logits"]
-                ], 0)
-                reward = reward_predictions.mean(0)
-                uncertainty = reward_predictions.std(0, unbiased=False)
-                reward = reward - getattr(
-                    self.args, "matwm_uncertainty_penalty", 0.0
-                ) * uncertainty
-                continuation = heads["continuation_logits"].sigmoid()
-                if original_marie:
-                    imagined_available = (
-                        self.world_model.predicted_availability_from_hidden(
-                            hidden
+                        hidden_sequence = hidden[:, None]
+                    elif use_dynamics_cache:
+                        hidden_sequence, dynamics_cache = (
+                            self.world_model.append_dynamics_cache(
+                                latent_history[:, -1:], next_actions, focal,
+                                dynamics_cache,
+                            )
                         )
-                    )
-                if (
-                    original_marie
-                    and dynamics_cache is not None
-                    and hasattr(self.world_model, "sample_next_latent_cached")
-                ):
-                    next_latent, hidden, dynamics_cache = (
-                        self.world_model.sample_next_latent_cached(
-                            hidden, dynamics_cache
+                    else:
+                        hidden_sequence = self.world_model.dynamics_sequence(
+                            latent_history, action_history, focal
                         )
+                    hidden = hidden_sequence[:, -1]
+                    cached_next_latent = (
+                        original_marie and dynamics_cache is not None
+                        and hasattr(self.world_model, "sample_next_latent_cached")
                     )
-                elif hasattr(self.world_model, "sample_next_latent"):
-                    next_latent = self.world_model.sample_next_latent(hidden)
-                else:
-                    next_index = Categorical(
-                        logits=heads["dynamics_logits"]
-                    ).sample()
-                    next_latent = F.one_hot(
-                        next_index, self.world_model.n_categories
-                    ).to(hidden.dtype)
-                latent_history = th.cat((latent_history, next_latent[:, None]), dim=1)
-                if getattr(self.args, "marie_stack_obs", 0):
-                    next_observation = self.world_model.decode(next_latent)
-                    imagined_observations = th.cat(
-                        (imagined_observations, next_observation[:, None]), dim=1
-                    )
-                    if imagined_observations.shape[1] > self.world_model.max_seq_length:
-                        imagined_observations = imagined_observations[
-                            :, -self.world_model.max_seq_length:
-                        ]
-                teammate = self.world_model.teammate_logits(latent_history)[:, -1]
-                # Keep both histories aligned after the WM truncates its context.
-                if latent_history.shape[1] > self.world_model.max_seq_length:
-                    latent_history = latent_history[:, -self.world_model.max_seq_length:]
-                    action_history = action_history[:, -(self.world_model.max_seq_length - 1):]
-            rewards.append(reward)
-            continuations.append(continuation)
-            if not original_marie:
-                survival = survival * continuation
+                    # Cached sampling below produces the actual next tokens;
+                    # do not also generate a discarded autoregressive sequence.
+                    if (cached_next_latent
+                        and getattr(self.args, "marie_skip_unused_dynamics", True)
+                        and hasattr(self.world_model, "prediction_auxiliary_heads")):
+                        heads = self.world_model.prediction_auxiliary_heads(
+                            hidden, latent_history[:, -1]
+                        )
+                    else:
+                        heads = self.world_model.prediction_heads(
+                            hidden, latent_history[:, -1]
+                        )
+                    reward_predictions = th.stack([
+                        self.world_model.reward_value(logits)
+                        for logits in heads["reward_ensemble_logits"]
+                    ], 0)
+                    reward = reward_predictions.mean(0)
+                    uncertainty = reward_predictions.std(0, unbiased=False)
+                    reward = reward - getattr(
+                        self.args, "matwm_uncertainty_penalty", 0.0
+                    ) * uncertainty
+                    continuation = heads["continuation_logits"].sigmoid()
+                    if original_marie:
+                        imagined_available = (
+                            self.world_model.predicted_availability_from_hidden(
+                                hidden
+                            )
+                        )
+                    if cached_next_latent:
+                        next_latent, hidden, dynamics_cache = (
+                            self.world_model.sample_next_latent_cached(
+                                hidden, dynamics_cache
+                            )
+                        )
+                    elif hasattr(self.world_model, "sample_next_latent"):
+                        next_latent = self.world_model.sample_next_latent(hidden)
+                    else:
+                        next_index = Categorical(
+                            logits=heads["dynamics_logits"]
+                        ).sample()
+                        next_latent = F.one_hot(
+                            next_index, self.world_model.n_categories
+                        ).to(hidden.dtype)
+                    latent_history = th.cat((latent_history, next_latent[:, None]), dim=1)
+                    if getattr(self.args, "marie_stack_obs", 0):
+                        next_observation = self.world_model.decode(next_latent)
+                        if cache_policy_observations:
+                            # Preserve encode(decode(tokens)): using the first
+                            # decode directly would change the policy's inputs.
+                            reconstructed_next = self.policy.reconstruct_observations(
+                                next_observation[:, None]
+                            )
+                            keep = min(self.policy.stack_obs, self.world_model.max_seq_length)
+                            reconstructed_observations = th.cat(
+                                (reconstructed_observations, reconstructed_next), dim=1
+                            )[:, -keep:]
+                        else:
+                            imagined_observations = th.cat(
+                                (imagined_observations, next_observation[:, None]), dim=1
+                            )
+                            if imagined_observations.shape[1] > self.world_model.max_seq_length:
+                                imagined_observations = imagined_observations[
+                                    :, -self.world_model.max_seq_length:
+                                ]
+                    teammate = self.world_model.teammate_logits(latent_history)[:, -1]
+                    # Keep both histories aligned after the WM truncates its context.
+                    if latent_history.shape[1] > self.world_model.max_seq_length:
+                        latent_history = latent_history[:, -self.world_model.max_seq_length:]
+                        action_history = action_history[:, -(self.world_model.max_seq_length - 1):]
+                rewards.append(reward)
+                continuations.append(continuation)
+                if not original_marie:
+                    survival = survival * continuation
 
         with th.no_grad():
-            final_state = self.policy.build_state(
-                latent_history[:, -1], hidden, teammate, focal,
-                imagined_observations
-                if getattr(self.args, "marie_stack_obs", 0) else None,
-            )
-            use_ema_bootstrap = getattr(
-                self.args, "matwm_ema_bootstrap", True
-            )
+            if cache_policy_observations:
+                final_state = self.policy.build_state_from_reconstructed(
+                    reconstructed_observations
+                )
+            else:
+                final_state = self.policy.build_state(
+                    latent_history[:, -1], hidden, teammate, focal,
+                    imagined_observations
+                    if getattr(self.args, "marie_stack_obs", 0) else None,
+                )
             next_return = self.policy.values(
                 final_state, focal, ema=use_ema_bootstrap
             )
@@ -1000,9 +1050,11 @@ class MATWMLearner:
         returns.reverse()
 
         log_probs = th.stack(log_probs, 1)
-        entropies = th.stack(entropies, 1)
+        if not imagined_ppo:
+            entropies = th.stack(entropies, 1)
         values = th.stack(values, 1)
-        ema_values = th.stack(ema_values, 1)
+        if need_ema_values:
+            ema_values = th.stack(ema_values, 1)
         returns = th.stack(returns, 1)
         if original_marie:
             advantage = (returns - values).detach()
@@ -1026,12 +1078,11 @@ class MATWMLearner:
             )).clamp_min(1.0)
             advantage = (returns - values).detach() / scale
         entropy_coefficient = getattr(self.args, "matwm_entropy_coef", 3e-4)
-        if getattr(self.args, "marie_imagined_ppo", False):
+        if imagined_ppo:
             states = th.stack(rollout_states, 1).detach()
             actions = th.stack(rollout_actions, 1).detach()
             available = th.stack(rollout_available, 1).detach()
             old_log_probs = log_probs.detach().squeeze(-1)
-            old_values = values.detach().squeeze(-1)
             fixed_returns = returns.detach().squeeze(-1)
             fixed_advantage = advantage.detach().squeeze(-1)
             if original_marie:
@@ -1051,7 +1102,6 @@ class MATWMLearner:
                     -1, self.n_actions
                 )
                 flat_old_log_probs = team_time(old_log_probs).reshape(-1)
-                flat_old_values = team_time(old_values).reshape(-1)
                 flat_returns = team_time(fixed_returns).reshape(-1)
                 flat_advantage = team_time(fixed_advantage).reshape(-1)
                 flat_focal = th.arange(
@@ -1068,7 +1118,6 @@ class MATWMLearner:
                 flat_actions = actions.reshape(-1)
                 flat_available = available.reshape(-1, self.n_actions)
                 flat_old_log_probs = old_log_probs.reshape(-1)
-                flat_old_values = old_values.reshape(-1)
                 flat_returns = fixed_returns.reshape(-1)
                 flat_advantage = fixed_advantage.reshape(-1)
                 flat_focal = focal[:, None].expand(-1, horizon).reshape(-1)
@@ -1173,13 +1222,13 @@ class MATWMLearner:
                             ),
                         )
                         self.agent_optimiser.step()
-                    actor_losses.append(actor_loss.item())
-                    critic_losses.append(critic_loss.item())
-                    grad_norms.append(float(grad_norm))
+                    actor_losses.append(actor_loss.detach())
+                    critic_losses.append(critic_loss.detach())
+                    grad_norms.append(grad_norm.detach())
             self.policy.update_ema(getattr(self.args, "matwm_ema_decay", 0.98))
             return {
-                "matwm_actor_loss": sum(actor_losses) / len(actor_losses),
-                "matwm_critic_loss": sum(critic_losses) / len(critic_losses),
+                "matwm_actor_loss": th.stack(actor_losses).mean().item(),
+                "matwm_critic_loss": th.stack(critic_losses).mean().item(),
                 "matwm_real_critic_loss": 0.0,
                 "matwm_return_mean": returns.mean().item(),
                 "matwm_critic_return_mean": returns.mean().item(),
@@ -1187,7 +1236,7 @@ class MATWMLearner:
                 "matwm_imagination_continue": th.stack(
                     continuations, 1
                 ).mean().item(),
-                "matwm_agent_grad_norm": sum(grad_norms) / len(grad_norms),
+                "matwm_agent_grad_norm": th.stack(grad_norms).mean().item(),
                 "marie_controlled_fraction": (
                     1.0 if controlled is None
                     else controlled.float().mean().item()

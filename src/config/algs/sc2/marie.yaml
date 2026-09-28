@@ -135,3 +135,13 @@ marie_allow_tf32: False
 
 # Group optimizer operations across tensors; opt-in pending benchmarking.
 marie_optimizer_foreach: False
+
+# Faster FP32 inference; gradient-based world-model training retains SDPA.
+marie_manual_inference_attention: True
+# Preserve every held-out window while evaluating multiple teams together.
+marie_validation_batch_size: 32
+
+# Reuse frozen-tokenizer reconstructions within each imagined rollout.
+marie_cache_policy_observations: True
+# Cached next-token generation makes the separate dynamics-logit pass redundant.
+marie_skip_unused_dynamics: True

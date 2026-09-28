@@ -10,6 +10,7 @@ from torch.optim import Adam, AdamW
 
 from learners.matwm_learner import MATWMLearner
 from modules.marie_convergence import ModelConvergence
+from modules.marie_validation import collect_validation
 from components.episode_buffer import EpisodeBatch
 
 
@@ -616,57 +617,10 @@ class MARIELearner(MATWMLearner):
             self.world_model.eval()
             with th.random.fork_rng(devices=devices):
                 th.manual_seed(1729)
-                for batch in batches:
-                    for episode in range(batch.batch_size):
-                        length = int(batch["filled"][episode].sum().item()) - 1
-                        if length < 1:
-                            continue
-                        # Cover beginnings, middles and terminal boundaries.
-                        width = min(15, length)
-                        starts = sorted(set((0, (length-width)//2, length-width)))
-                        for start in starts:
-                            obs = batch["obs"][episode, start:start+width+1].to(device)
-                            actions = batch["actions"][episode, start:start+width].to(device)
-                            rewards = batch["reward"][episode, start:start+width].to(device)
-                            done = batch["terminated"][episode, start:start+width].to(device)
-                            avail = batch["avail_actions"][episode, start:start+width+1].to(device)
-                            target, _ = self.world_model.encode(obs.transpose(0, 1), sample=False)
-                            reconstruction_errors.append((
-                                self.world_model.decode(target) - obs.transpose(0, 1)
-                            ).abs().mean().item())
-                            latent = target[:, :1]
-                            focal = th.arange(self.n_agents, device=device)
-                            cache = None
-                            predicted_return = th.zeros(self.n_agents, 1, device=device)
-                            real_return = th.zeros_like(predicted_return)
-                            for step in range(width):
-                                action = actions[step][:, None]
-                                if cache is None:
-                                    hidden, cache = self.world_model.init_dynamics_cache(latent, action, focal)
-                                    hidden = hidden[:, -1]
-                                else:
-                                    hidden, cache = self.world_model.append_action_cache(latent, action, focal, cache)
-                                heads = self.world_model.prediction_heads(hidden, latent[:, -1])
-                                reward = self.world_model.reward_value(heads["reward_ensemble_logits"][0])
-                                predicted_return += reward
-                                real_return += rewards[step]
-                                terminal = heads["continuation_logits"].sigmoid() < 0.5
-                                terminal_target = done[step].bool().expand_as(terminal)
-                                availability = self.world_model.predicted_availability_from_hidden(hidden)
-                                next_latent, _, cache = self.world_model.sample_next_latent_cached(hidden, cache)
-                                horizon = step + 1
-                                if horizon in records:
-                                    records[horizon].append({
-                                        "observation_mae": (self.world_model.decode(next_latent)-obs[horizon]).abs().mean().item(),
-                                        "token_accuracy": (next_latent.argmax(-1)==target[:, horizon].argmax(-1)).float().mean().item(),
-                                        "reward_mae": (reward-rewards[step]).abs().mean().item(),
-                                        "return_mae": (predicted_return-real_return).abs().mean().item(),
-                                        "availability_accuracy": (availability.bool()==avail[horizon].bool()).float().mean().item(),
-                                        "terminal_tp": (terminal & terminal_target).sum().item(),
-                                        "terminal_predicted": terminal.sum().item(),
-                                        "terminal_actual": terminal_target.sum().item(),
-                                    })
-                                latent = next_latent[:, None]
+                records, reconstruction_errors = collect_validation(
+                    self.world_model, batches, self.n_agents,
+                    int(getattr(self.args, "marie_validation_batch_size", 32)),
+                )
         finally:
             for module, training in modes:
                 module.training = training
@@ -852,6 +806,7 @@ class MARIELearner(MATWMLearner):
                 "model_last_eval_t": self.model_last_eval_t,
                 "convergence": self.convergence.state_dict() if self.convergence else None,
                 "convergence_batches": self.convergence_batches,
+                "validation_batch_size": int(getattr(self.args, "marie_validation_batch_size", 32)),
             },
             os.path.join(path, "marie_training_state.th"),
         )
@@ -880,6 +835,15 @@ class MARIELearner(MATWMLearner):
 
             if self.convergence is not None and state.get("convergence") is not None:
                 self.convergence.load_state_dict(state["convergence"])
+                if (not self.convergence.frozen and
+                    state.get("validation_batch_size", 1) != int(
+                        getattr(self.args, "marie_validation_batch_size", 32))):
+                    # Batched sampling changes the stochastic realization.
+                    # Start a new plateau window rather than mixing protocols.
+                    self.convergence.previous = None
+                    self.convergence.history = []
+                    self.convergence.streak = 0
+                    self.convergence.last_event = None
                 self.convergence_batches = state.get("convergence_batches")
                 if self.convergence.frozen:
                     self.policy_only = True
