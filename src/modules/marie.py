@@ -349,9 +349,10 @@ class PerceiverAggregator(nn.Module):
             nn.LayerNorm(hidden_dim) for _ in range(layers)
         ])
 
-    def forward(self, agent_features):
+    def forward(self, agent_features, n_agents=None):
         # agent_features: [batch*time, agents, hidden]
-        token = self.query.unsqueeze(0).expand(agent_features.shape[0], -1, -1)
+        queries = self.query if n_agents is None else self.query[:n_agents]
+        token = queries.unsqueeze(0).expand(agent_features.shape[0], -1, -1)
         update = self.cross_attention(
             self.cross_query_norm(token),
             self.cross_context_norm(agent_features),
@@ -518,32 +519,35 @@ class MARIEWorldModel(MATWMWorldModel):
         # Central aggregation is computed before temporal prediction from all
         # agents' local observation/action encodings, then inserted as the last
         # token of every causal block, matching upstream MARIE's layout.
+        group_size = getattr(self, "context_n_agents", self.n_agents)
         streams = observation_tokens.shape[0]
         complete_teams = False
-        if streams % self.n_agents == 0:
-            ids = focal_ids.view(-1, self.n_agents)
-            expected = th.arange(self.n_agents, device=ids.device)[None]
+        if streams % group_size == 0:
+            ids = focal_ids.view(-1, group_size)
+            expected = th.arange(group_size, device=ids.device)[None]
             complete_teams = th.equal(ids, expected.expand_as(ids))
         if complete_teams:
-            batch = streams // self.n_agents
+            batch = streams // group_size
             # Preserve every local VQ token. Upstream MARIE's Perceiver sees
             # N * (M observation tokens + one action token), not an average.
             team_tokens = th.cat(
                 (observation_tokens, action_token.unsqueeze(-2)), dim=-2
             ).view(
-                batch, self.n_agents, length, self.n_latents + 1,
+                batch, group_size, length, self.n_latents + 1,
                 self.hidden_dim,
             ).permute(0, 2, 1, 3, 4).reshape(
                 batch * length,
-                self.n_agents * (self.n_latents + 1),
+                group_size * (self.n_latents + 1),
                 self.hidden_dim,
             )
             agent_positions = self.perceiver_agent_position[
-                :self.n_agents
+                :group_size
             ].repeat_interleave(self.n_latents + 1, dim=0)
             team_tokens = team_tokens + agent_positions[None]
-            aggregate = self.aggregator(team_tokens).view(
-                batch, length, self.n_agents, self.hidden_dim
+            aggregate = (self.aggregator(team_tokens) if group_size == self.n_agents
+                         else self.aggregator(team_tokens, n_agents=group_size))
+            aggregate = aggregate.view(
+                batch, length, group_size, self.hidden_dim
             ).permute(0, 2, 1, 3).reshape(
                 streams, length, self.hidden_dim
             )

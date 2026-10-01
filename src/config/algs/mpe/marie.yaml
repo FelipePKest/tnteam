@@ -124,6 +124,13 @@ marie_reduced_model_interval: 5
 
 # Heuristic model convergence: fixed held-out validation + relative parameter motion.
 marie_convergence_stop: False
+# Opt-in reversible validation plateau; default preserves existing experiments.
+marie_convergence_mode: parameters
+marie_loss_window: 3
+marie_loss_patience: 6
+marie_loss_min_delta: 0.02
+marie_loss_deterioration: 0.15
+marie_loss_recovery_patience: 3
 marie_convergence_window: 3
 marie_convergence_patience: 2
 marie_convergence_parameter_tolerance: 0.01
@@ -149,3 +156,8 @@ marie_validation_batch_size: 32
 marie_cache_policy_observations: True
 # Cached next-token generation makes the separate dynamics-logit pass redundant.
 marie_skip_unused_dynamics: True
+
+# Only controlled-agent streams enter sampled training and validation contexts.
+marie_controlled_replay_only: False
+# Graceful training deadline; reserve remaining wall time for final saving/evaluation.
+training_wall_time_seconds: 0

@@ -9,8 +9,9 @@ import torch.nn.functional as F
 from torch.optim import Adam, AdamW
 
 from learners.matwm_learner import MATWMLearner
-from modules.marie_convergence import ModelConvergence
+from modules.marie_convergence import ModelConvergence, ValidationPlateau
 from modules.marie_validation import collect_validation
+from modules.marie_controlled_context import compact_controlled, controlled_group, controlled_training
 from components.episode_buffer import EpisodeBatch
 
 
@@ -106,6 +107,10 @@ class MARIELearner(MATWMLearner):
         self.model_last_eval_t = None
         self.convergence = None
         self.convergence_batches = None
+        self._controlled_context_counts = {}
+        self.convergence_mode = getattr(args, "marie_convergence_mode", "parameters")
+        if self.convergence_mode not in ("parameters", "validation"):
+            raise ValueError("MARIE convergence mode must be parameters or validation")
         if getattr(args, "marie_convergence_stop", False):
             if self.adaptive_model_updates:
                 raise ValueError("Choose convergence stopping or win-rate scheduling, not both")
@@ -116,11 +121,21 @@ class MARIELearner(MATWMLearner):
                 validation_tolerance=getattr(args, "marie_convergence_validation_tolerance", 0.02),
                 min_events=getattr(args, "marie_convergence_min_events", 20),
             )
+            if self.convergence_mode == "validation":
+                self.convergence = ValidationPlateau(
+                    window=getattr(args, "marie_loss_window", 3),
+                    patience=getattr(args, "marie_loss_patience", 6),
+                    min_delta=getattr(args, "marie_loss_min_delta", .02),
+                    min_events=getattr(args, "marie_convergence_min_events", 20),
+                    deterioration=getattr(args, "marie_loss_deterioration", .15),
+                    recovery_patience=getattr(args, "marie_loss_recovery_patience", 3),
+                )
         self.policy_only = getattr(args, "marie_policy_only", False)
         if self.policy_only:
             self.world_model.requires_grad_(False)
             self.world_model.eval()
 
+    @controlled_training
     def _train_tokenizer(self, batch):
         self.world_model.encoder.train()
         observation = batch["obs"]
@@ -171,6 +186,7 @@ class MARIELearner(MATWMLearner):
             "marie_tokenizer_grad_norm": float(grad_norm),
         }
 
+    @controlled_training
     def _train_agents(self, batch):
         # no_grad alone does not disable dropout. Imagination must use the
         # inference-mode dynamics, as in upstream MARIE.
@@ -182,6 +198,7 @@ class MARIELearner(MATWMLearner):
             for module, training in modes:
                 module.training = training
 
+    @controlled_training
     def _train_world_model(self, batch, validate_rollout=False):
         """Train the four prediction heads used by upstream MARIE.
 
@@ -512,14 +529,20 @@ class MARIELearner(MATWMLearner):
         }
 
     def _replay_batch(self, replay, batch_size, sequence_length, mode):
+        options = {}
+        if getattr(self.args, "marie_controlled_replay_only", False):
+            options["controlled_only"] = True
         batch = replay.sample_marie(
             batch_size,
             sequence_length,
             mode=mode,
             temperature=getattr(self.args, "marie_sample_temperature", "inf"),
+            **options,
         )
         if batch.device != th.device(self.args.device):
             batch.to(self.args.device)
+        if getattr(self.args, "marie_controlled_replay_only", False):
+            self._controlled_context_counts.setdefault(mode, []).append(batch["obs"].shape[2])
         return batch
 
     def observe_evaluation(self, win_rate, t_env):
@@ -560,7 +583,10 @@ class MARIELearner(MATWMLearner):
         return (self.marie_update_events - self.model_reduced_since) % self.model_update_interval == 0
 
     def observe_model_convergence(self, batches, t_env):
-        if self.convergence is None or self.policy_only:
+        if getattr(self.args, "marie_policy_only", False):
+            return  # An explicit policy-only request is not a reversible freeze.
+        reversible = isinstance(self.convergence, ValidationPlateau)
+        if self.convergence is None or (self.policy_only and not (reversible and self.convergence.frozen)):
             return
         if self.convergence_batches is None:
             # Keep the first held-out episodes fixed for comparable measurements.
@@ -585,14 +611,27 @@ class MARIELearner(MATWMLearner):
             "h%d/%s" % (h, metric) for h in (1, 5, 15)
             for metric in ("observation_mae", "reward_mae", "return_mae")
         ]
-        if any("marie_fixed_validation/"+key not in stats for key in keys):
+        if not reversible and any("marie_fixed_validation/"+key not in stats for key in keys):
             return  # insufficient held-out horizon; never infer convergence
-        metrics = {key: stats["marie_fixed_validation/"+key] for key in keys}
-        diagnostics, frozen = self.convergence.observe(
-            ModelConvergence.snapshot(self.world_model), metrics, self.marie_update_events)
+        metrics = {key: stats.get("marie_fixed_validation/"+key, float('nan')) for key in keys}
+        if reversible:
+            cached = getattr(self, "_fresh_validation", None)
+            fresh_stats = (cached[1] if cached is not None and cached[0] == t_env
+                           else self.validate_world_model(batches, t_env))
+            fresh = {key: fresh_stats.get("marie_validation/"+key, float('nan')) for key in keys}
+            diagnostics, frozen = self.convergence.observe(metrics, fresh, self.marie_update_events)
+        else:
+            diagnostics, frozen = self.convergence.observe(
+                ModelConvergence.snapshot(self.world_model), metrics, self.marie_update_events)
         for key, value in diagnostics.items():
             self.logger.log_stat("marie_convergence/"+key, value, t_env)
-        if frozen:
+        if reversible and self.policy_only and not frozen:
+            self.policy_only = False
+            self.world_model.requires_grad_(True)
+            self.world_model.train()
+            self.logger.console_logger.info(
+                "MARIE validation recovery at t_env=%s: resuming tokenizer and world-model updates", t_env)
+        if frozen and not self.policy_only:
             self.policy_only = True
             self.world_model.requires_grad_(False)
             self.world_model.eval()
@@ -617,10 +656,25 @@ class MARIELearner(MATWMLearner):
             self.world_model.eval()
             with th.random.fork_rng(devices=devices):
                 th.manual_seed(1729)
-                records, reconstruction_errors = collect_validation(
-                    self.world_model, batches, self.n_agents,
-                    int(getattr(self.args, "marie_validation_batch_size", 32)),
-                )
+                validation_size = int(getattr(self.args, "marie_validation_batch_size", 32))
+                if getattr(self.args, "marie_controlled_replay_only", False):
+                    groups = {}
+                    for batch in batches:
+                        # Team composition can differ between evaluation batches.
+                        for row in range(batch.batch_size):
+                            compact = compact_controlled(batch[row:row+1])
+                            groups.setdefault(compact["obs"].shape[2], []).append(compact)
+                    for count, grouped in sorted(groups.items()):
+                        with controlled_group(self, count):
+                            measured, errors = collect_validation(
+                                self.world_model, grouped, count, validation_size)
+                        for horizon in records:
+                            records[horizon].extend(measured[horizon])
+                        reconstruction_errors.extend(errors)
+                else:
+                    records, reconstruction_errors = collect_validation(
+                        self.world_model, batches, self.n_agents, validation_size)
+
         finally:
             for module, training in modes:
                 module.training = training
@@ -647,6 +701,8 @@ class MARIELearner(MATWMLearner):
             result[prefix+"windows"] = len(rows)
         for key, value in result.items():
             self.logger.log_stat(key, value, t_env)
+        if base_prefix == "marie_validation":
+            self._fresh_validation = (t_env, result)
         return result
 
     def _stage_time(self):
@@ -657,6 +713,7 @@ class MARIELearner(MATWMLearner):
 
     def train_from_replay(self, replay, t_env, episode_num):
         """Run one canonical MARIE update event using fresh replay draws."""
+        self._controlled_context_counts = {}
         self.train_calls += 1
         self.marie_update_events += 1
         update_model = self._update_model_this_event()
@@ -722,6 +779,10 @@ class MARIELearner(MATWMLearner):
             "total": policy_finished - started,
         }.items():
             self.logger.log_stat("marie_seconds_" + key, seconds, t_env)
+
+        for mode, sizes in self._controlled_context_counts.items():
+            self.logger.log_stat("marie_replay_" + mode + "_agents_per_context",
+                                 sum(sizes) / len(sizes), t_env)
 
         stats = {
             **self._average_stats(tokenizer_stats),
@@ -805,6 +866,7 @@ class MARIELearner(MATWMLearner):
                 "model_reduced_since": self.model_reduced_since,
                 "model_last_eval_t": self.model_last_eval_t,
                 "convergence": self.convergence.state_dict() if self.convergence else None,
+                "convergence_mode": self.convergence_mode,
                 "convergence_batches": self.convergence_batches,
                 "validation_batch_size": int(getattr(self.args, "marie_validation_batch_size", 32)),
             },
@@ -834,8 +896,16 @@ class MARIELearner(MATWMLearner):
             self.model_last_eval_t = state.get("model_last_eval_t")
 
             if self.convergence is not None and state.get("convergence") is not None:
-                self.convergence.load_state_dict(state["convergence"])
-                if (not self.convergence.frozen and
+                same_mode = state.get("convergence_mode", "parameters") == self.convergence_mode
+                if same_mode:
+                    self.convergence.load_state_dict(state["convergence"])
+                if isinstance(self.convergence, ValidationPlateau):
+                    # Replay is rebuilt on restart; don't mix plateau histories.
+                    # Frozen checkpoints retain their recovery baseline.
+                    if (not self.convergence.frozen or state.get("validation_batch_size", 1)
+                            != int(getattr(self.args, "marie_validation_batch_size", 32))):
+                        self.convergence.reset()
+                elif (not self.convergence.frozen and
                     state.get("validation_batch_size", 1) != int(
                         getattr(self.args, "marie_validation_batch_size", 32))):
                     # Batched sampling changes the stochastic realization.

@@ -9,6 +9,7 @@ from types import SimpleNamespace as SN
 from utils.logging import Logger
 from utils.timehelper import time_left, time_str
 from utils.load_utils import find_model_path
+from utils.training_budget import TrainingBudget
 from os.path import dirname, abspath
 from os import makedirs
 
@@ -90,6 +91,7 @@ def evaluate_sequential(args, runner):
     print("Evaluation took {} seconds".format(end_time - start_time))
 
 def run_sequential(args, logger):
+    budget = TrainingBudget(float(getattr(args, "training_wall_time_seconds", 0)))
     print("ENV IS : ", args.env)
     args.open_train_or_eval = True if "open" in args.mac else False
     # Init runner so we can get env info
@@ -266,7 +268,7 @@ def run_sequential(args, logger):
                 break
             interleaved_update_credit -= 1.0
 
-    while runner.t_env <= args.t_max:
+    while runner.t_env <= args.t_max and not budget.expired():
         # Run for a whole episode at a time
         step_callback = train_matwm_after_step if interleaved_updates else None
         episode_batch, _ = runner.run(
@@ -297,6 +299,7 @@ def run_sequential(args, logger):
                 if (
                     marie_new_transitions >= update_interval
                     and buffer.marie_transition_count() >= minimum_replay
+                    and not budget.expired()
                 ):
                     learner.train_from_replay(buffer, runner.t_env, episode)
                     # Reference MARIE resets rather than retaining overshoot.
@@ -409,7 +412,7 @@ def run_sequential(args, logger):
 
         # Execute test runs once in a while
         n_test_runs = max(1, args.test_nepisode // runner.batch_size_run)
-        if (runner.t_env - last_test_T) / args.test_interval >= 1.0:
+        if (runner.t_env - last_test_T) / args.test_interval >= 1.0 and not budget.expired():
             
             logger.console_logger.info(
                 "t_env: {} / {}".format(runner.t_env, args.t_max)
@@ -499,6 +502,32 @@ def run_sequential(args, logger):
             logger.print_recent_stats()
             last_log_T = runner.t_env
 
+    if getattr(args, "training_wall_time_seconds", 0):
+        # Persist the exact final training state before spending time on eval.
+        save_path = os.path.join(args.local_results_path, "models", args.expt_logname, str(runner.t_env))
+        os.makedirs(save_path, exist_ok=True)
+        learner.save_models(save_path)
+        reason = "wall-clock budget" if budget.expired() else "timestep budget"
+        logger.console_logger.info("Training stopped at t_env=%s (%s); saved %s", runner.t_env, reason, save_path)
+        if last_test_T != runner.t_env:
+            test_batches = []
+            for _ in range(max(1, args.test_nepisode // runner.batch_size_run)):
+                test_batch, mean_test_return = runner.run(test_mode=True)
+                test_batches.append(test_batch)
+            test_win_rate = getattr(runner, "last_test_battle_won", -1.0)
+            better = ((test_win_rate, mean_test_return) > (best_test_win_rate, best_test_return)
+                      if getattr(args, "marie_original_procedure", False)
+                      else mean_test_return > best_test_return)
+            if better:
+                best_path = os.path.join(args.local_results_path, "models", args.expt_logname, "best")
+                os.makedirs(best_path, exist_ok=True)
+                learner.save_models(best_path)
+                with open(os.path.join(best_path, "best_info.json"), "w") as stream:
+                    json.dump(dict(best_test_return=mean_test_return, best_test_win_rate=test_win_rate,
+                                   best_ts=str(runner.t_env)), stream)
+            if getattr(args, "marie_validate_heldout", False):
+                learner.validate_world_model(test_batches, runner.t_env)
+            logger.print_recent_stats()
     runner.close_env()
     if hasattr(learner, "close"):
         learner.close()

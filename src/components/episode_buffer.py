@@ -273,7 +273,7 @@ class ReplayBuffer(EpisodeBatch):
         return len(self._marie_candidates(sequence_length)) >= batch_size
 
     def sample_marie(
-        self, batch_size, sequence_length, mode="model", temperature="inf"
+        self, batch_size, sequence_length, mode="model", temperature="inf", controlled_only=False
     ):
         """Visit-balanced transition sampling used by canonical MARIE.
 
@@ -283,11 +283,14 @@ class ReplayBuffer(EpisodeBatch):
         """
         if mode == "policy":
             return self._sample_marie_policy(
-                batch_size, sequence_length + 1
+                batch_size, sequence_length + 1, controlled_only=controlled_only
             )
         if mode not in self.marie_sample_visits:
             raise ValueError("Unknown MARIE replay mode: {}".format(mode))
         candidates = self._marie_candidates(sequence_length)
+        if controlled_only:
+            counts = self._controlled_counts()[candidates[:, 0]]
+            candidates = candidates[self._controlled_pool(counts, batch_size)]
         if len(candidates) < batch_size:
             raise ValueError(
                 "Not enough MARIE transitions: {} available, {} requested".format(
@@ -332,9 +335,30 @@ class ReplayBuffer(EpisodeBatch):
             result.data.episode_data[key].copy_(value[episode_index])
         # Selection is without replacement, so each (episode, start) is unique.
         visit_array[sampled[:, 0], sampled[:, 1]] += 1
+        if controlled_only:
+            from modules.marie_controlled_context import compact_controlled
+            return compact_controlled(result)
         return result
 
-    def _sample_marie_policy(self, batch_size, observation_length):
+    def _controlled_counts(self):
+        mask = self.data.transition_data.get("trainable_agents")
+        if mask is None:
+            raise ValueError("Controlled replay needs a trainable_agents mask")
+        return mask[:self.episodes_in_buffer, 0, :, 0].sum(-1).cpu().numpy()
+
+    @staticmethod
+    def _controlled_pool(counts, minimum):
+        # Choose a cohort in proportion to its number of eligible records.
+        # Conditional sampling keeps teams intact without padding fake agents.
+        sizes, frequencies = np.unique(counts, return_counts=True)
+        eligible = (sizes > 0) & (frequencies >= minimum)
+        if not eligible.any():
+            raise ValueError("Insufficient controlled replay records in a single team-size cohort")
+        sizes, frequencies = sizes[eligible], frequencies[eligible]
+        chosen = np.random.choice(sizes, p=frequencies/frequencies.sum())
+        return counts == chosen
+
+    def _sample_marie_policy(self, batch_size, observation_length, controlled_only=False):
         """Match MultiAgentEpisodesDataset endpoint sampling and left padding."""
         if self.episodes_in_buffer == 0:
             raise ValueError("Cannot sample MARIE policy contexts from empty replay")
@@ -346,9 +370,11 @@ class ReplayBuffer(EpisodeBatch):
             preprocess=None, device=self.device,
         )
         # Upstream uses random.choices: episodes are uniform with replacement.
-        episodes = np.random.choice(
-            self.episodes_in_buffer, batch_size, replace=True
-        )
+        episode_pool = self.episodes_in_buffer
+        if controlled_only:
+            counts = self._controlled_counts()
+            episode_pool = np.flatnonzero(self._controlled_pool(counts, 1))
+        episodes = np.random.choice(episode_pool, batch_size, replace=True)
         for output, episode in enumerate(episodes):
             filled = int(
                 self.data.transition_data["filled"][episode].sum().item()
@@ -370,6 +396,9 @@ class ReplayBuffer(EpisodeBatch):
                 ]
             for key, value in self.data.episode_data.items():
                 result.data.episode_data[key][output] = value[episode]
+        if controlled_only:
+            from modules.marie_controlled_context import compact_controlled
+            return compact_controlled(result)
         return result
 
     def can_sample(self, batch_size):

@@ -81,3 +81,100 @@ class ModelConvergence:
     def load_state_dict(self, state):
         for key in ('previous', 'history', 'streak', 'frozen', 'last_event'):
             setattr(self, key, state[key])
+
+
+class ValidationPlateau:
+    """Reversible freeze based on rolling component errors, never weights.
+
+    Fresh errors use their own pre-freeze baseline, not the fixed distribution.
+    """
+    def __init__(self, window=3, patience=6, min_delta=.02, min_events=20,
+                 deterioration=.15, recovery_patience=3):
+        if window < 1 or patience < 1 or min_events < 1 or recovery_patience < 1:
+            raise ValueError('Validation window, patience and min_events must be positive')
+        if not 0 < min_delta < 1 or not 0 < deterioration < 1:
+            raise ValueError('Validation thresholds must be in (0, 1)')
+        self.settings = dict(window=window, patience=patience, min_delta=min_delta,
+                             min_events=min_events, deterioration=deterioration,
+                             recovery_patience=recovery_patience)
+        self.reset()
+
+    def reset(self):
+        self.history = []
+        self.fresh_history = []
+        self.best = {}
+        self.bad = {}
+        self.baseline = {}
+        self.recovery_streak = 0
+        self.frozen = False
+        self.last_event = None
+        self.start_event = None
+
+    @staticmethod
+    def _mean(rows):
+        return {key: sum(row[key] for row in rows) / len(rows) for key in rows[0]}
+
+    def observe(self, metrics, fresh, event):
+        if self.last_event is not None and event <= self.last_event:
+            return {}, self.frozen
+        self.last_event = event
+        valid = (bool(metrics) and metrics.keys() == fresh.keys()
+                 and all(math.isfinite(v) and v >= 0 for v in [*metrics.values(), *fresh.values()]))
+        if self.history and self.history[0].keys() != metrics.keys():
+            valid = False
+        if not valid:
+            was_frozen = self.frozen
+            self.reset()
+            self.last_event = event
+            return {'invalid_validation': 1, 'thawed': int(was_frozen), 'frozen': 0}, False
+        if self.start_event is None:
+            self.start_event = event
+        self.history.append(dict(metrics))
+        self.fresh_history.append(dict(fresh))
+        self.history = self.history[-self.settings['window']:]
+        self.fresh_history = self.fresh_history[-self.settings['window']:]
+        diagnostics = {'frozen': int(self.frozen), 'thawed': 0}
+        if len(self.history) < self.settings['window']:
+            return diagnostics, self.frozen
+        averaged, fresh_mean = self._mean(self.history), self._mean(self.fresh_history)
+        if self.frozen:
+            degraded = any(fresh_mean[k] > v + self.settings['deterioration'] * max(v, 1e-6)
+                           for k, v in self.baseline.items())
+            self.recovery_streak = self.recovery_streak + 1 if degraded else 0
+            diagnostics['recovery_streak'] = self.recovery_streak
+            for key, baseline in self.baseline.items():
+                diagnostics[key + '_fresh_relative_increase'] = (fresh_mean[key] - baseline) / max(baseline, 1e-6)
+            if self.recovery_streak >= self.settings['recovery_patience']:
+                self.reset()
+                self.last_event = event
+                diagnostics.update(thawed=1, frozen=0)
+            return diagnostics, self.frozen
+        for key, value in averaged.items():
+            best = self.best.get(key)
+            if best is None or best - value > self.settings['min_delta'] * max(best, 1e-6):
+                self.best[key], self.bad[key] = value, 0
+            else:
+                self.bad[key] += 1
+            diagnostics[key + '_no_improvement_checks'] = self.bad[key]
+        degraded = any(averaged[k] > v + self.settings['deterioration'] * max(v, 1e-6)
+                       for k, v in self.best.items())
+        enough_updates = event - self.start_event >= self.settings['min_events']
+        self.frozen = (enough_updates and not degraded
+                       and min(self.bad.values()) >= self.settings['patience'])
+        if self.frozen:
+            self.baseline = fresh_mean
+        diagnostics.update(no_improvement_checks=min(self.bad.values()),
+                           deterioration_blocked=int(degraded), frozen=int(self.frozen))
+        return diagnostics, self.frozen
+
+    def state_dict(self):
+        import copy
+        return copy.deepcopy(self.__dict__)
+
+    def load_state_dict(self, state):
+        import copy
+        if state.get('settings') != self.settings:
+            self.reset()
+            return False
+        self.__dict__.update(copy.deepcopy(state))
+        return True
