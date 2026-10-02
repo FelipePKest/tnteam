@@ -278,3 +278,19 @@ tb_logs/
 tb_logs/*
 events.out.*
 *.pdf
+
+# Local experiment environments and generated output trees
+/3sv5z/
+/mpe-pp/
+/environment_snapshots/
+/notebooks/colab/*.zip
+
+plots/
+plots/*
+scripts/
+scripts/*
+docs/
+docs/*
+tests/
+tests/*
+notebooks/

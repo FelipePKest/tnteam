@@ -1,0 +1,37 @@
+# Fresh controlled-only MARIE on 3s_vs_5z.
+# Applied over open/open_train_3sv5z and sc2/marie by the controlled launcher.
+# Budget, training seed, teammate seed and output paths are launcher arguments.
+name: marie_naht
+env_args:
+  map_name: 3s_vs_5z
+batch_size_run: 4
+trained_agents:
+  agent_0:
+    agent_loader: marie_train_agent_loader
+    agent_path: ''
+checkpoint_path: ''
+resume_t_env_from_checkpoint: false
+marie_controlled_replay_only: true
+marie_allow_tf32: true
+marie_manual_inference_attention: true
+marie_cache_policy_observations: true
+marie_skip_unused_dynamics: true
+marie_validation_batch_size: 32
+# Restore the original MARIE learning budget per update event.
+marie_tokenizer_epochs: 200
+marie_world_epochs: 200
+marie_policy_epochs: 5
+marie_ppo_epochs: 5
+matwm_agent_batch_size: 600
+matwm_imagination_horizon: 15
+marie_policy_temperature: 1.0
+marie_convergence_stop: false
+marie_policy_only: false
+marie_adaptive_model_updates: false
+marie_validate_heldout: true
+marie_optimizer_foreach: false
+test_nepisode: 128
+test_interval: 20000
+save_model_interval: 10000
+log_interval: 5000
+learner_log_interval: 5000

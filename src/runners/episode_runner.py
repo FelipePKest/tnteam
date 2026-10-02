@@ -53,7 +53,7 @@ class EpisodeRunner:
         self.batch = self.new_batch()
         if self.open_train_or_eval:
             trainable_mask = self.compute_open_agent_mask(self.batch, self.trained_agent_idxs)
-            self.batch.update({"trainable_agents": trainable_mask})
+            self.batch.update({"trainable_agents": trainable_mask}, mark_filled=False)
             team_idx = self.mac.active_uncontrolled_team_idx
             if team_idx is None:
                 team_idx = -1
@@ -70,7 +70,7 @@ class EpisodeRunner:
                     self.trained_agent_idxs,
                     team_idx,
                 )
-                self.batch.update({"policy_type": policy_type_labels})
+                self.batch.update({"policy_type": policy_type_labels}, mark_filled=False)
         self.env.reset()
         self.t = 0
 
@@ -179,7 +179,7 @@ class EpisodeRunner:
         # filter batch data for data corresponding to trained agents only
         if self.open_train_or_eval:
             trainable_mask = self.compute_open_agent_mask(self.batch, self.trained_agent_idxs)
-            self.batch.update({"trainable_agents": trainable_mask})
+            self.batch.update({"trainable_agents": trainable_mask}, mark_filled=False)
             team_idx = self.mac.active_uncontrolled_team_idx
             if team_idx is None:
                 team_idx = -1
@@ -196,7 +196,7 @@ class EpisodeRunner:
                     self.trained_agent_idxs,
                     team_idx,
                 )
-                self.batch.update({"policy_type": policy_type_labels})
+                self.batch.update({"policy_type": policy_type_labels}, mark_filled=False)
 
         return self.batch, mean_test_return
 

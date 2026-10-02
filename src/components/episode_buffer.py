@@ -336,7 +336,7 @@ class ReplayBuffer(EpisodeBatch):
         # Selection is without replacement, so each (episode, start) is unique.
         visit_array[sampled[:, 0], sampled[:, 1]] += 1
         if controlled_only:
-            from modules.marie_controlled_context import compact_controlled
+            from components.marie_context import compact_controlled
             return compact_controlled(result)
         return result
 
@@ -397,7 +397,7 @@ class ReplayBuffer(EpisodeBatch):
             for key, value in self.data.episode_data.items():
                 result.data.episode_data[key][output] = value[episode]
         if controlled_only:
-            from modules.marie_controlled_context import compact_controlled
+            from components.marie_context import compact_controlled
             return compact_controlled(result)
         return result
 

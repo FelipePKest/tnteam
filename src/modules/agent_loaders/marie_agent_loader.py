@@ -7,8 +7,8 @@ from torch.distributions import Categorical
 
 from components.action_selectors import REGISTRY as action_REGISTRY
 from modules.agent_loaders.base_agent_loader import BaseAgentLoader
-from modules.marie import MARIEPolicy
-from modules.marie_checkpoint import load_reference_marie_checkpoint
+from modules.agents.marie_policy import MARIEPolicy
+from modules.world_models.marie.checkpoint import load_reference_marie_checkpoint
 from utils.load_utils import find_model_path
 
 

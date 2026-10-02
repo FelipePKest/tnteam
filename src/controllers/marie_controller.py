@@ -2,8 +2,8 @@ import torch as th
 from torch.distributions import Categorical
 import os
 
-from modules.marie_checkpoint import load_reference_marie_checkpoint
-from modules.marie import MARIEPolicy
+from modules.world_models.marie.checkpoint import load_reference_marie_checkpoint
+from modules.agents.marie_policy import MARIEPolicy
 
 
 class MARIEMAC:

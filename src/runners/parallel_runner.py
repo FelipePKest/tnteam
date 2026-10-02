@@ -74,7 +74,7 @@ class ParallelRunner:
             self.trained_agent_idxs = self.mac.sample_agent_team()
             # compute and store trainable agents mask
             trainable_mask = self.compute_open_agent_mask(self.batch, self.trained_agent_idxs)
-            self.batch.update({"trainable_agents": trainable_mask})
+            self.batch.update({"trainable_agents": trainable_mask}, mark_filled=False)
             team_idx = self.mac.active_uncontrolled_team_idx
             if team_idx is None:
                 team_idx = -1
@@ -91,7 +91,7 @@ class ParallelRunner:
                     self.trained_agent_idxs,
                     team_idx,
                 )
-                self.batch.update({"policy_type": policy_type_labels})
+                self.batch.update({"policy_type": policy_type_labels}, mark_filled=False)
 
         # Reset the envs
         for parent_conn in self.parent_conns:
