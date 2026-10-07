@@ -21,6 +21,7 @@ use_tensorboard: True # Log results to tensorboard
 save_model: True # Save the models to disk
 save_model_interval: 1000000 # Save models after this many timesteps
 checkpoint_path: "" # Load a checkpoint from this path
+resume_t_env_from_checkpoint: false # Fresh runs keep the environment-step counter at zero
 eval_mode: null # choices: null, default, open. 
 # default = Evaluate model for test_nepisode episodes and quit (no training)
 # open =  perform open evaluation for test_episodes and quit (no training)

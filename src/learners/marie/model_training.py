@@ -315,8 +315,10 @@ class MARIEModelTraining:
                 if validate_rollout:
                     rollout_target = latent[:, 1:].argmax(-1)
                     rollout_horizon = min(
-                        getattr(self.args, "marie_validation_horizon", 5), length
+                        getattr(self.args, "marie_validation_horizon", 5),
+                        length - int(getattr(batch, 'marie_reference_records', False)),
                     )
+                    rollout_alive = th.ones(batch_size * n_agents, dtype=th.bool, device=obs.device)
                     rollout_latent = latent[:, :1]
                     rollout_actions = focal_actions[:, :0]
                     for rollout_step in range(rollout_horizon):
@@ -333,9 +335,13 @@ class MARIEModelTraining:
                             )
                         )
                         rollout_index = rollout_logits.argmax(-1)
-                        rollout_correct.append((
-                            rollout_index == rollout_target[:, rollout_step]
-                        ).float().mean())
+                        # A reset observation after done is not a physical
+                        # next-observation target for an open-loop rollout.
+                        rollout_alive &= ~terminated[:, rollout_step, 0].bool().repeat_interleave(n_agents)
+                        if rollout_alive.any():
+                            rollout_correct.append((
+                                rollout_index[rollout_alive] == rollout_target[rollout_alive, rollout_step]
+                            ).float().mean())
                         rollout_next = F.one_hot(
                             rollout_index, self.world_model.n_categories
                         ).to(latent.dtype)

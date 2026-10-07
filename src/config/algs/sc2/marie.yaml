@@ -7,6 +7,8 @@ on_policy: False
 batch_size: 30
 buffer_size: 512
 matwm_replay_capacity_steps: 250000
+# Independent episodic policy dataset, capped on process RAM like reference MARIE.
+marie_policy_replay_ram_gb: 30
 matwm_replay_decay: null
 matwm_prefill_steps: 1000
 marie_min_replay_steps: 1000

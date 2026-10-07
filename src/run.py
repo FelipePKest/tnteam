@@ -17,6 +17,7 @@ from learners import REGISTRY as le_REGISTRY
 from runners import REGISTRY as r_REGISTRY
 from controllers import REGISTRY as mac_REGISTRY
 from components.episode_buffer import ReplayBuffer
+from components.marie_replay import MARIEReplayBuffer
 from components.transforms import OneHot
 
 
@@ -145,14 +146,18 @@ def run_sequential(args, logger):
                 args.batch_size,
                 int(math.ceil(capacity_steps / float(env_info["episode_limit"])))
             )
-    buffer = ReplayBuffer(
-        scheme,
-        groups,
-        buffer_size,
-        env_info["episode_limit"] + 1,
-        preprocess=preprocess,
-        device="cpu" if args.buffer_cpu_only else args.device,
-    )
+    replay_device = "cpu" if args.buffer_cpu_only else args.device
+    if args.learner == "marie_learner" and getattr(args, "marie_original_procedure", False):
+        buffer = MARIEReplayBuffer(
+            scheme, groups, getattr(args, "matwm_replay_capacity_steps", 250000),
+            preprocess=preprocess, device=replay_device,
+            policy_memory_limit_bytes=int(getattr(args, "marie_policy_replay_ram_gb", 30) * 1024**3),
+        )
+    else:
+        buffer = ReplayBuffer(
+            scheme, groups, buffer_size, env_info["episode_limit"] + 1,
+            preprocess=preprocess, device=replay_device,
+        )
     latent_ppo_batch_size = getattr(args, "matwm_ppo_batch_episodes", 0)
     use_batched_latent_ppo = (
         is_world_model_learner

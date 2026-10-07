@@ -228,6 +228,10 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
         self.train_calls += 1
         self.marie_update_events += 1
         update_model = self._update_model_this_event()
+        self.logger.log_stat('marie_model_replay_transitions', replay.marie_transition_count(), t_env)
+        if hasattr(replay, 'policy_steps'):
+            self.logger.log_stat('marie_policy_replay_transitions', replay.policy_steps, t_env)
+            self.logger.log_stat('marie_policy_replay_episodes', len(replay.episodes), t_env)
         self.logger.log_stat("marie_model_updated", int(update_model), t_env)
         self.logger.log_stat("marie_model_update_interval", self._model_interval(), t_env)
         started = self._stage_time()

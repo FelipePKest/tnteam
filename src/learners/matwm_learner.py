@@ -794,6 +794,12 @@ class MATWMLearner:
         original_marie = getattr(
             self.args, "marie_original_procedure", False
         )
+        if original_marie:
+            # Reference H entries contain H-1 training transitions and one
+            # bootstrap state. No action/reward at the bootstrap state is used.
+            horizon -= 1
+            if horizon < 1:
+                raise ValueError('MARIE imagination horizon must be at least 2')
         imagined_ppo = getattr(self.args, "marie_imagined_ppo", False)
         use_ema_bootstrap = getattr(self.args, "matwm_ema_bootstrap", True)
         need_ema_values = use_ema_bootstrap or (
@@ -848,17 +854,23 @@ class MATWMLearner:
             teammate = self.world_model.teammate_logits(latent_history)[:, -1]
         imagined_observations = observations
         cache_policy_observations = (
-            original_marie and getattr(self.args, "marie_cache_policy_observations", True)
+            original_marie
             and getattr(self.args, "marie_stack_obs", 0)
             and hasattr(self.policy, "reconstruct_observations")
         )
         # This cache belongs only to this rollout. Tokenizer weights and its
         # codebook cannot change before the rollout finishes.
         reconstructed_observations = None
+        generated_observations = []
         if cache_policy_observations:
-            reconstructed_observations = self.policy.reconstruct_observations(
-                observations
-            )[:, -self.policy.stack_obs:]
+            valid_history = batch['filled'][:, -observations.shape[1]:, 0].bool()
+            valid_history = valid_history[:, None].expand(
+                -1, self.n_agents, -1
+            ).reshape(observations.shape[0], observations.shape[1], 1)
+            def reconstruct_initial_history():
+                reconstructed = self.policy.reconstruct_observations(observations)
+                return reconstructed.masked_fill(~valid_history, 0)[:, -self.policy.stack_obs:]
+            reconstructed_observations = reconstruct_initial_history()
 
 
         log_probs, entropies, values, ema_values = [], [], [], []
@@ -873,6 +885,10 @@ class MATWMLearner:
         with th.set_grad_enabled(th.is_grad_enabled() and not imagined_ppo):
             for _ in range(horizon):
                 if cache_policy_observations:
+                    if generated_observations and not getattr(self.args, 'marie_cache_policy_observations', True):
+                        reconstructed_observations = th.cat(
+                            [reconstruct_initial_history()] + generated_observations, dim=1
+                        )[:, -self.policy.stack_obs:]
                     state = self.policy.build_state_from_reconstructed(
                         reconstructed_observations
                     ).detach()
@@ -991,11 +1007,12 @@ class MATWMLearner:
                     if getattr(self.args, "marie_stack_obs", 0):
                         next_observation = self.world_model.decode(next_latent)
                         if cache_policy_observations:
-                            # Preserve encode(decode(tokens)): using the first
-                            # decode directly would change the policy's inputs.
-                            reconstructed_next = self.policy.reconstruct_observations(
-                                next_observation[:, None]
-                            )
+                            # Reference feeds generated token decodes directly
+                            # to the actor, without quantizing them a second time.
+                            reconstructed_next = next_observation[:, None]
+                            if not getattr(self.args, 'marie_cache_policy_observations', True):
+                                generated_observations.append(reconstructed_next)
+                                generated_observations = generated_observations[-self.policy.stack_obs:]
                             keep = min(self.policy.stack_obs, self.world_model.max_seq_length)
                             reconstructed_observations = th.cat(
                                 (reconstructed_observations, reconstructed_next), dim=1
