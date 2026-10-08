@@ -1,0 +1,32 @@
+# CPU-only, x86_64 image for running the Linux headless StarCraft II build on an
+# Apple Silicon Mac through Docker Desktop's Rosetta emulation (or on any x86 box
+# without a GPU). Mirrors the pinned versions in docker/requirements.txt minus CUDA.
+#
+# Build (from repo root):
+#   docker build --platform linux/amd64 -f docker/Dockerfile.cpu -t tnteam-cpu:amd64 .
+# Run (repo, game and teammates are mounted, nothing is copied):
+#   docker run --rm --platform linux/amd64 -v "$PWD":/workspace/tnteam -w /workspace/tnteam \
+#       tnteam-cpu:amd64 python scripts/probe_collect.py --help
+# The game is expected at 3rdparty/StarCraftII (SC2 4.6.2 + SMAC maps), see install_sc2.sh.
+FROM python:3.10-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MPLCONFIGDIR=/tmp/matplotlib \
+    SC2PATH=/workspace/tnteam/3rdparty/StarCraftII \
+    PYTHONPATH=/workspace/tnteam/src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential git unzip wget libglib2.0-0 libgl1 libsm6 libxext6 \
+        libxrender1 libxi6 libfontconfig1 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/tnteam
+
+COPY docker/requirements.txt /tmp/tnteam-requirements.txt
+RUN python -m pip install --upgrade "pip<25" wheel "setuptools<70" && \
+    python -m pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu && \
+    python -m pip install -r /tmp/tnteam-requirements.txt scikit-learn && \
+    python -c "import torch, smac, pysc2, mpe, sacred; print('cpu image ok', torch.__version__)"
+
+CMD ["bash"]
