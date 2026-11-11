@@ -122,6 +122,7 @@ class ParallelRunner:
         all_terminated = False
         episode_returns = [0 for _ in range(self.batch_size_run)]
         episode_lengths = [0 for _ in range(self.batch_size_run)]
+        episode_wins = [False for _ in range(self.batch_size_run)]
         terminated = [False for _ in range(self.batch_size_run)]
         envs_not_terminated = [b_idx for b_idx, termed in enumerate(terminated) if not termed]
         final_env_infos = []  # may store extra stats like battle won. this is filled in ORDER OF TERMINATION
@@ -171,6 +172,8 @@ class ParallelRunner:
                 "reward": [],
                 "terminated": []
             }
+            if 'episode_end' in self.scheme:
+                post_transition_data['episode_end'] = []
             # Data for the next step we will insert in order to select an action
             pre_transition_data = {
                 "state": [],
@@ -198,11 +201,14 @@ class ParallelRunner:
                     env_terminated = False
                     if data["terminated"]:
                         final_env_infos.append(data["info"])
+                        episode_wins[idx] = bool(data['info'].get('battle_won', False))
                         local_term_idx_list.append(local_term_idx)
                     if data["terminated"] and not data["info"].get("episode_limit", False):
                         env_terminated = True
                     terminated[idx] = data["terminated"]
                     post_transition_data["terminated"].append((env_terminated,))
+                    if 'episode_end' in self.scheme:
+                        post_transition_data['episode_end'].append((data['terminated'],))
 
                     # Data for the next timestep needed to select an action
                     pre_transition_data["state"].append(data["state"])
@@ -247,6 +253,9 @@ class ParallelRunner:
         cur_stats["n_episodes"] = self.batch_size_run + cur_stats.get("n_episodes", 0)
         cur_stats["ep_length"] = sum(episode_lengths) + cur_stats.get("ep_length", 0)
         cur_returns.extend(episode_returns)
+        self.last_episode_outcomes = [dict(won=won, **{'return': ret}, length=length)
+                                      for won, ret, length in zip(
+                                          episode_wins, episode_returns, episode_lengths)]
 
         if test_mode and self.args.test_verbose:
             print("Number of episodes collected: ", cur_stats["n_episodes"])
@@ -260,7 +269,7 @@ class ParallelRunner:
             mean_test_return = np.mean(self.test_returns)
             self._log(cur_returns, cur_stats, log_prefix)
             logged_stats = True
-        elif self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
+        elif not test_mode and self.t_env - self.log_train_stats_t >= self.args.runner_log_interval:
             self._log(cur_returns, cur_stats, log_prefix)
             if hasattr(self.mac.action_selector, "epsilon"):
                 self.logger.log_stat("epsilon", self.mac.action_selector.epsilon, self.t_env)

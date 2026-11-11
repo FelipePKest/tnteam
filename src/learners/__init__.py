@@ -16,6 +16,7 @@ from .classifier_learner import ClassifierLearner
 from .policy_repr_poam_leaner import PolicyRepresentationPOAMLearner
 from .matwm_learner import MATWMLearner
 from .marie_learner import MARIELearner
+from .mambpo_learner import MAMBPOLearner
 
 REGISTRY = {}
 REGISTRY["q_learner"] = QLearner
@@ -34,3 +35,4 @@ REGISTRY["classifier_learner"] = ClassifierLearner
 REGISTRY["policy_repr_poam_learner"] = PolicyRepresentationPOAMLearner
 REGISTRY["matwm_learner"] = MATWMLearner
 REGISTRY["marie_learner"] = MARIELearner
+REGISTRY["mambpo_learner"] = MAMBPOLearner

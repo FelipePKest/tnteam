@@ -58,6 +58,18 @@ class MARIETrainAgentLoader(BaseAgentLoader):
     def load_models(self, path):
         native_path = os.path.join(path, "agent.th")
         if os.path.exists(native_path):
+            if (getattr(self.args, 'marie_reset_critic_on_load', False)
+                    or getattr(self.args, 'marie_reset_actor_on_load', False)):
+                saved = th.load(native_path, map_location='cpu')
+                retained = {k:v for k,v in saved.items()
+                            if not (getattr(self.args,'marie_reset_critic_on_load',False)
+                                    and k.startswith(('critics.','ema_critics.')))
+                            and not (getattr(self.args,'marie_reset_actor_on_load',False)
+                                     and k.startswith('actors.'))}
+                current = self.policy.state_dict()
+                current.update(retained)
+                self.policy.load_state_dict(current, strict=True)
+                return
             return super().load_models(path)
         load_reference_marie_checkpoint(
             self.policy, os.path.join(path, "reference_marie.pt")

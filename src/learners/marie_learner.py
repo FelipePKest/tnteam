@@ -27,6 +27,11 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
         # Opt-in TF32 for CUDA matrix multiplication; keep existing precision by default.
         th.backends.cuda.matmul.allow_tf32 = bool(getattr(args, "marie_allow_tf32", False))
         super().__init__(mac, scheme, logger, args)
+        if getattr(args,'marie_full_team_world_model',False):
+            if getattr(args,'marie_controlled_replay_only',False):
+                raise ValueError('Full-team world model must retain uncontrolled replay streams')
+            if not (self.policy.latent_actor and self.policy.latent_critic):
+                raise ValueError('Joint world-model experiment requires fully latent behavior')
         tokenizer_parameters = (
             list(self.world_model.encoder.parameters())
             + list(self.world_model.decoder.parameters())
@@ -48,6 +53,9 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
         world_ids = {id(parameter) for parameter in world_parameters}
         decay_ids = set()
         for module in self.world_model.modules():
+            if isinstance(module, nn.GRUCell):
+                decay_ids.update(id(p) for p in (module.weight_ih, module.weight_hh)
+                                 if id(p) in world_ids)
             if isinstance(module, (nn.Linear, nn.Conv1d, nn.MultiheadAttention)):
                 weight = getattr(module, "weight", None)
                 if weight is not None and id(weight) in world_ids:
@@ -141,16 +149,123 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
             self.world_model.eval()
 
     @controlled_training
-    def _train_agents(self, batch):
+    def _train_agents(self, batch, real_batch=None):
         # no_grad alone does not disable dropout. Imagination must use the
         # inference-mode dynamics, as in upstream MARIE.
         modes = [(module, module.training) for module in self.world_model.modules()]
         self.world_model.eval()
+        real_weight = float(getattr(self.args, "marie_real_critic_weight", 0.0))
+        if not 0.0 <= real_weight < 1.0:
+            raise ValueError("marie_real_critic_weight must be in [0, 1)")
+        self._marie_real_critic_examples = (
+            self._build_real_critic_examples(real_batch if real_batch is not None else batch)
+            if real_weight else None
+        )
         try:
             return super()._train_agents(batch)
         finally:
+            self._marie_real_critic_examples = None
             for module, training in modes:
                 module.training = training
+
+    @th.no_grad()
+    def _build_real_critic_examples(self, batch):
+        """Five-step real targets for a critic-only auxiliary objective.
+
+        The actor never sees these returns. Each example retains a complete
+        controlled team so the centralized critic's attention path is active.
+        External timeouts bootstrap because ``terminated`` excludes them.
+        """
+        horizon = int(getattr(self.args, "marie_real_critic_horizon", 5))
+        stack = int(getattr(self.args, "marie_stack_obs", 5))
+        required = stack + horizon
+        if horizon < 1:
+            raise ValueError("marie_real_critic_horizon must be positive")
+        if hasattr(batch, 'marie_real_critic_steps'):
+            return self._terminal_inclusive_real_examples(batch, stack, horizon)
+        if batch.max_seq_length < required:
+            raise ValueError(
+                f"Real critic supervision needs {required} replay records; "
+                f"received {batch.max_seq_length}"
+            )
+        # Policy replay is right aligned. Exclude early-episode samples whose
+        # real prefix/future is incomplete instead of treating padding as data.
+        start = batch.max_seq_length - required
+        valid_rows = batch["filled"][:, start:].all(dim=1).squeeze(-1)
+        if not valid_rows.any():
+            return None
+        obs = batch["obs"][valid_rows, start:start + required]
+        teams, _, agents, obs_dim = obs.shape
+        focal = th.arange(agents, device=batch.device).repeat(teams)
+
+        def state(frames):
+            frames = frames.permute(0, 2, 1, 3).reshape(
+                teams * agents, stack, obs_dim
+            )
+            return self.policy.build_state_from_reconstructed(
+                None if self.policy.latent_actor else self.policy.reconstruct_observations(frames),
+                latent=(self.world_model.encode(frames, sample=False)[0]
+                        if self.policy.latent_critic else None)
+            ).detach()
+
+        current_state = state(obs[:, :stack])
+        bootstrap_state = state(obs[:, horizon:horizon + stack])
+        bootstrap = self.policy.values(
+            bootstrap_state, focal,
+            ema=getattr(self.args, "matwm_ema_bootstrap", True),
+        ).reshape(teams, agents).detach()
+        rewards = batch["reward"][
+            valid_rows, start + stack - 1:start + stack - 1 + horizon, 0
+        ]
+        terminated = batch["terminated"][
+            valid_rows, start + stack - 1:start + stack - 1 + horizon, 0
+        ].float()
+        target = bootstrap
+        for step in reversed(range(horizon)):
+            target = rewards[:, step, None] + self.args.gamma * (
+                1.0 - terminated[:, step, None]
+            ) * target
+        result=(current_state.reshape(teams, agents, -1), target.detach())
+        if getattr(self.args,'marie_full_team_world_model',False):
+            result += (batch['trainable_agents'][valid_rows,start+stack-1,:,0].detach(),)
+        return result
+
+    @th.no_grad()
+    def _terminal_inclusive_real_examples(self, batch, stack, horizon):
+        steps = batch.marie_real_critic_steps
+        obs = batch['obs']
+        teams, _, agents, dim = obs.shape
+        focal = th.arange(agents, device=batch.device).repeat(teams)
+        rows = th.arange(teams, device=batch.device)[:, None]
+        offsets = th.arange(stack, device=batch.device)[None]
+
+        def state(indices):
+            frames = obs[rows, indices].permute(0, 2, 1, 3).reshape(
+                teams*agents, stack, dim)
+            reconstructed = (th.zeros_like(frames) if self.policy.latent_actor
+                             else self.policy.reconstruct_observations(frames))
+            valid = batch['filled'][rows, indices, 0].bool()
+            valid = valid[:, None].expand(-1, agents, -1).reshape(teams*agents, stack, 1)
+            reconstructed = reconstructed.masked_fill(~valid, 0)
+            return self.policy.build_state_from_reconstructed(reconstructed,
+                latent=(self.world_model.encode(frames, sample=False)[0]
+                        if self.policy.latent_critic else None),
+                latent_valid=valid).detach()
+
+        current = state(offsets.expand(teams, -1))
+        bootstrap_state = state(steps[:, None]+offsets)
+        target = self.policy.values(bootstrap_state, focal,
+            ema=getattr(self.args, 'matwm_ema_bootstrap', True)).reshape(teams, agents)
+        for step in reversed(range(horizon)):
+            index = stack-1+step
+            reward = batch['reward'][:, index, 0, None]
+            terminal = batch['terminated'][:, index, 0, None].float()
+            updated = reward+self.args.gamma*(1-terminal)*target
+            target = th.where((steps > step)[:, None], updated, target)
+        result=(current.reshape(teams, agents, -1),target.detach())
+        if getattr(self.args,'marie_full_team_world_model',False):
+            result += (batch['trainable_agents'][:,stack-1,:,0].detach(),)
+        return result
 
     @staticmethod
     def _average_stats(stats):
@@ -247,11 +362,21 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
 
         tokenizer_finished = self._stage_time()
         world_stats = []
+        alignment_weight = float(getattr(self.args, 'marie_value_alignment_weight', 0.0))
+        if alignment_weight < 0:
+            raise ValueError('Alignment weight must be nonnegative')
+        if alignment_weight:
+            import copy
+            self._alignment_guide = copy.deepcopy(self.policy.critics).eval()
+            self._alignment_guide.requires_grad_(False)
         if update_model and self.marie_update_events > getattr(
             self.args, "marie_world_warmup_events", 9
         ):
             world_epochs = getattr(self.args, "marie_world_epochs", 200)
             for world_epoch in range(world_epochs):
+                self._alignment_active = alignment_weight > 0 and world_epoch % max(
+                    1, int(getattr(self.args, 'marie_value_alignment_interval', 20))) == 0
+                self._alignment_seed = int(self.args.seed) + self.marie_update_events * 1000 + world_epoch
                 batch = self._replay_batch(
                     replay,
                     getattr(self.args, "batch_size", 30),
@@ -270,7 +395,7 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
         if self.marie_update_events > getattr(
             self.args, "marie_policy_warmup_events", 19
         ):
-            for _ in range(getattr(self.args, "marie_policy_epochs", 5)):
+            for policy_round in range(getattr(self.args, "marie_policy_epochs", 5)):
                 # Five observations provide the upstream four-history-plus-
                 # current policy stack. Draw contexts from the full replay.
                 batch = self._replay_batch(
@@ -279,7 +404,23 @@ class MARIELearner(MARIEModelTraining, MARIEValidation, MARIECheckpoint, MATWMLe
                     getattr(self.args, "marie_stack_obs", 5) - 1,
                     "policy",
                 )
-                agent_stats.append(self._train_agents(batch))
+                real_batch = None
+                if float(getattr(self.args, 'marie_real_critic_weight', 0.0)) > 0:
+                    import numpy as np
+                    rng = np.random.default_rng(np.random.SeedSequence([
+                        int(self.args.seed), int(t_env), int(policy_round), 431]))
+                    real_batch = replay.sample_real_critic(
+                        batch.batch_size, getattr(self.args, 'marie_stack_obs', 5),
+                        getattr(self.args, 'marie_real_critic_horizon', 5),
+                        controlled_count=(batch['obs'].shape[2] if getattr(
+                            self.args, 'marie_controlled_replay_only', False) else None),
+                        recent_steps=getattr(self.args, 'marie_real_critic_recent_steps', 50000),
+                        rng=rng)
+                    if real_batch.device != batch.device:
+                        future_steps = real_batch.marie_real_critic_steps
+                        real_batch.to(batch.device)
+                        real_batch.marie_real_critic_steps = future_steps.to(batch.device)
+                agent_stats.append(self._train_agents(batch, real_batch=real_batch))
         averaged_agent = self._average_stats(agent_stats)
         if averaged_agent:
             self.last_agent_stats = averaged_agent

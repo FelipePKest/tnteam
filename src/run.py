@@ -19,6 +19,7 @@ from controllers import REGISTRY as mac_REGISTRY
 from components.episode_buffer import ReplayBuffer
 from components.marie_replay import MARIEReplayBuffer
 from components.transforms import OneHot
+from utils.marie_experiment_evaluation import stratified_evaluation
 
 
 def run(_run, _config, _log):
@@ -73,6 +74,10 @@ def run(_run, _config, _log):
 
 def evaluate_sequential(args, runner):
     start_time = time.time()
+    if getattr(args, 'marie_stratified_evaluation', False):
+        stratified_evaluation(args, runner, runner.logger)
+        runner.close_env()
+        return
     while True:
         runner.run(test_mode=True)
         # when num_test_episodes have run, the test_stats buffer will be cleared
@@ -95,6 +100,15 @@ def run_sequential(args, logger):
     budget = TrainingBudget(float(getattr(args, "training_wall_time_seconds", 0)))
     print("ENV IS : ", args.env)
     args.open_train_or_eval = True if "open" in args.mac else False
+    separate_episode_ends = (
+        args.learner == 'marie_learner'
+        and (getattr(args, 'marie_bootstrap_time_limits', False)
+             or getattr(args, 'marie_terminal_inclusive_replay', False))
+    )
+    if getattr(args, 'marie_bootstrap_time_limits', False):
+        if args.env != 'gymma':
+            raise ValueError('marie_bootstrap_time_limits currently requires gymma')
+        args.env_args['bootstrap_time_limits'] = True
     # Init runner so we can get env info
     runner = r_REGISTRY[args.runner](args=args, logger=logger)
     # Set up schemes and groups here
@@ -119,6 +133,8 @@ def run_sequential(args, logger):
         "reward": {"vshape": (1,)},
         "terminated": {"vshape": (1,), "dtype": th.uint8}
     }
+    if separate_episode_ends:
+        scheme['episode_end'] = {'vshape': (1,), 'dtype': th.uint8}
     if args.open_train_or_eval: # track a mask relating to whether agents are trainable or not
         scheme["trainable_agents"] = {"vshape": (1,), "group": "agents", "dtype": th.bool}
         scheme["uncontrolled_team_idx"] = {
@@ -292,9 +308,10 @@ def run_sequential(args, logger):
                 )
                 episode_steps = max(0, filled - 1)
                 if episode_steps:
-                    # MARIE records the end of every collected episode as a
-                    # terminal boundary, including an environment time limit.
-                    episode_batch.data.transition_data["terminated"][
+                    # Keep reset boundaries separate from continuation targets
+                    # when external time limits should bootstrap.
+                    end_key = 'episode_end' if separate_episode_ends else 'terminated'
+                    episode_batch.data.transition_data[end_key][
                         batch_index, episode_steps - 1, 0
                     ] = 1
                 buffer.insert_episode_batch(
@@ -368,7 +385,9 @@ def run_sequential(args, logger):
             if recency_decay is not None:
                 # Replay entries are episodes; preserve the paper's per-step decay.
                 recency_decay = recency_decay ** env_info["episode_limit"]
-            updates_per_collect = 1
+            updates_per_collect = int(
+                getattr(args, "replay_updates_per_collect", 1)
+            )
             if is_world_model_learner:
                 updates_per_env_step = getattr(
                     args, "matwm_updates_per_env_step", None
@@ -431,14 +450,20 @@ def run_sequential(args, logger):
             last_time = time.time()
 
             last_test_T = runner.t_env
-            test_batches = []
-            for _ in range(n_test_runs):
-                test_batch, mean_test_return = runner.run(test_mode=True)
-                test_batches.append(test_batch)
+            if getattr(args, 'marie_stratified_evaluation', False):
+                test_batches, mean_test_return = stratified_evaluation(args, runner, logger)
+            else:
+                test_batches = []
+                for _ in range(n_test_runs):
+                    test_batch, mean_test_return = runner.run(test_mode=True)
+                    test_batches.append(test_batch)
 
             if getattr(args, "marie_validate_heldout", False):
                 validation = learner.validate_world_model(test_batches, runner.t_env)
                 logger.console_logger.info("Held-out world-model validation: %s", validation)
+
+            if getattr(args, "mambpo_validate_heldout", False):
+                learner.validate_world_model(test_batches, runner.t_env)
 
             if getattr(args, "marie_convergence_stop", False):
                 learner.observe_model_convergence(test_batches, runner.t_env)
@@ -515,10 +540,13 @@ def run_sequential(args, logger):
         reason = "wall-clock budget" if budget.expired() else "timestep budget"
         logger.console_logger.info("Training stopped at t_env=%s (%s); saved %s", runner.t_env, reason, save_path)
         if last_test_T != runner.t_env:
-            test_batches = []
-            for _ in range(max(1, args.test_nepisode // runner.batch_size_run)):
-                test_batch, mean_test_return = runner.run(test_mode=True)
-                test_batches.append(test_batch)
+            if getattr(args, 'marie_stratified_evaluation', False):
+                test_batches, mean_test_return = stratified_evaluation(args, runner, logger)
+            else:
+                test_batches = []
+                for _ in range(max(1, args.test_nepisode // runner.batch_size_run)):
+                    test_batch, mean_test_return = runner.run(test_mode=True)
+                    test_batches.append(test_batch)
             test_win_rate = getattr(runner, "last_test_battle_won", -1.0)
             better = ((test_win_rate, mean_test_return) > (best_test_win_rate, best_test_return)
                       if getattr(args, "marie_original_procedure", False)
@@ -532,6 +560,7 @@ def run_sequential(args, logger):
                                    best_ts=str(runner.t_env)), stream)
             if getattr(args, "marie_validate_heldout", False):
                 learner.validate_world_model(test_batches, runner.t_env)
+            logger.log_stat('episode', episode, runner.t_env)
             logger.print_recent_stats()
     runner.close_env()
     if hasattr(learner, "close"):

@@ -71,6 +71,7 @@ class GymmaWrapper(MultiAgentEnv):
     def __init__(self, key, time_limit, seed,
                  pretrained_wrapper=None, 
                  record_video=False, 
+                 bootstrap_time_limits=False,
                  **kwargs):
         if key is None:
             raise ValueError(
@@ -84,6 +85,7 @@ class GymmaWrapper(MultiAgentEnv):
                 importlib.import_module(env_pkg)
         self.original_env = gym.make(f"{key}", **kwargs)
         self.episode_limit = time_limit
+        self.bootstrap_time_limits = bootstrap_time_limits
         self._env = TimeLimit(self.original_env, max_episode_steps=time_limit)
         self._env = FlattenObservation(self._env)
         self.record_video = record_video
@@ -131,7 +133,10 @@ class GymmaWrapper(MultiAgentEnv):
             reward = sum(reward)
         if type(done) is list:
             done = all(done)
-        return float(reward), done, {}
+        info = {}
+        if self.bootstrap_time_limits:
+            info['episode_limit'] = bool(self._info.get('TimeLimit.truncated', False))
+        return float(reward), done, info
 
     def get_obs(self):
         """ Returns all agent observations in a list """

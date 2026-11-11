@@ -47,7 +47,7 @@ class Logger:
             if k == "episode":
                 continue
             i += 1
-            window = 5 if k != "epsilon" else 1
+            window = 1 if k == 'epsilon' or k.startswith('test_full_') else 5
             try:
                 item = "{:.4f}".format(np.mean([x[1] for x in self.stats[k][-window:]]))
             except:

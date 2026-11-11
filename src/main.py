@@ -1,5 +1,6 @@
 import datetime
 import numpy as np
+import random
 import os
 import collections
 from copy import deepcopy
@@ -26,6 +27,7 @@ def my_main(_run, _config, _log):
     # Setting the random seed throughout the modules
     config = config_copy(_config)
     np.random.seed(config["seed"])
+    random.seed(config["seed"])
     th.manual_seed(config["seed"])
     config['env_args']['seed'] = config["seed"]
 
@@ -94,6 +96,24 @@ def add_base_results_path(base_results_path, new_path):
         new_path = os.path.join(base_results_path, new_path)
     return new_path
 
+
+def sacred_override(params, key):
+    """Read a simple ``with key=value`` override before Sacred starts.
+
+    Sacred normally applies these values inside ``run_commandline``.  The file
+    observer is constructed just before that call, so output-path overrides
+    otherwise send checkpoints and Sacred metrics to different directories.
+    """
+    try:
+        with_index = params.index("with")
+    except ValueError:
+        return None
+    prefix = key + "="
+    for argument in params[with_index + 1:]:
+        if argument.startswith(prefix):
+            return argument[len(prefix):]
+    return None
+
 if __name__ == '__main__':
     params = deepcopy(sys.argv)
 
@@ -130,7 +150,17 @@ if __name__ == '__main__':
     # add config to sacred
     ex.add_config(config_dict)
 
-    file_obs_path = os.path.join(config_dict["local_results_path"], 
+    observer_results_path = config_dict["local_results_path"]
+    results_override = sacred_override(params, "local_results_path")
+    if results_override is not None:
+        observer_results_path = (
+            results_override
+            if os.path.isabs(results_override)
+            else add_base_results_path(
+                config_dict["base_results_path"], results_override
+            )
+        )
+    file_obs_path = os.path.join(observer_results_path,
                                  "sacred",  
                                  config_dict["expt_logname"])
     logger.info(f"Saving to FileStorageObserver in {file_obs_path}.")

@@ -815,6 +815,8 @@ class MATWMLearner:
             controlled = trainable[:, -1, :, 0].reshape(-1).bool()
 
         # The learned environment is fixed during policy improvement.
+        initial_memory = None
+        memory_valid = None
         with th.no_grad():
             encoded_history, _ = self.world_model.encode(observations, sample=True)
             use_dynamics_cache = hasattr(
@@ -822,13 +824,24 @@ class MATWMLearner:
             )
             if original_marie:
                 # Upstream reset_from_initial_observations starts at the final
-                # observation. Earlier frames only form the policy stack.
+                # observation. Optional GRU memory summarizes earlier valid
+                # records without inserting padded frames into attention.
                 latent_history = encoded_history[:, -1:]
                 hidden = observations.new_zeros(
                     observations.shape[0], self.world_model.hidden_dim
                 )
                 dynamics_cache = None
                 action_history = context_actions[:, :0]
+                if getattr(self.world_model, 'recurrent_world_model', False):
+                    memory_valid = batch['filled'][:, -observations.shape[1]:, 0].bool()
+                    memory_valid = memory_valid.repeat_interleave(self.n_agents, dim=0)[:, :-1]
+                    end = batch.data.transition_data.get('episode_end', batch['terminated'])
+                    memory_end = end[:, -observations.shape[1]:, 0].bool()
+                    memory_end = memory_end.repeat_interleave(self.n_agents, dim=0)[:, :-1]
+                    initial_memory = self.world_model.burn_in_memory(
+                        encoded_history[:, :-1], context_actions, focal,
+                        valid=memory_valid, episode_end=memory_end,
+                    )
             else:
                 latent_history = encoded_history
                 dynamics_actions = context_actions
@@ -868,9 +881,13 @@ class MATWMLearner:
                 -1, self.n_agents, -1
             ).reshape(observations.shape[0], observations.shape[1], 1)
             def reconstruct_initial_history():
+                if getattr(self.policy,'latent_actor',False):
+                    return th.zeros_like(observations)[:, -self.policy.stack_obs:]
                 reconstructed = self.policy.reconstruct_observations(observations)
                 return reconstructed.masked_fill(~valid_history, 0)[:, -self.policy.stack_obs:]
             reconstructed_observations = reconstruct_initial_history()
+            critic_latent_history = encoded_history.detach()
+            critic_history_valid = valid_history
 
 
         log_probs, entropies, values, ema_values = [], [], [], []
@@ -890,7 +907,8 @@ class MATWMLearner:
                             [reconstruct_initial_history()] + generated_observations, dim=1
                         )[:, -self.policy.stack_obs:]
                     state = self.policy.build_state_from_reconstructed(
-                        reconstructed_observations
+                        reconstructed_observations,
+                        latent=critic_latent_history, latent_valid=critic_history_valid
                     ).detach()
                 else:
                     state = self.policy.build_state(
@@ -910,6 +928,13 @@ class MATWMLearner:
                 logits = logits.masked_fill(~available, -1e9)
                 distribution = Categorical(logits=logits)
                 action = distribution.sample()
+                if getattr(self.args,'marie_full_team_world_model',False):
+                    if controlled is None:
+                        raise ValueError('Full-team imagination requires controlled-agent masks')
+                    with th.no_grad():
+                        foreign_logits=self.world_model.foreign_action_logits(latent_history[:,-1])
+                        foreign_actions=Categorical(logits=foreign_logits.masked_fill(~available,-1e9)).sample()
+                        action=th.where(controlled,action,foreign_actions)
 
                 rollout_states.append(state)
                 rollout_actions.append(action)
@@ -931,9 +956,12 @@ class MATWMLearner:
                         )
                     action_history = th.cat((action_history, next_actions), dim=1)
                     if use_dynamics_cache and dynamics_cache is None:
+                        memory_options = ({'recurrent_state': initial_memory}
+                                          if initial_memory is not None else {})
                         hidden_sequence, dynamics_cache = (
                             self.world_model.init_dynamics_cache(
-                                latent_history[:, -1:], next_actions, focal
+                                latent_history[:, -1:], next_actions, focal,
+                                **memory_options,
                             )
                         )
                     elif use_dynamics_cache and original_marie:
@@ -1005,8 +1033,14 @@ class MATWMLearner:
                         ).to(hidden.dtype)
                     latent_history = th.cat((latent_history, next_latent[:, None]), dim=1)
                     if getattr(self.args, "marie_stack_obs", 0):
-                        next_observation = self.world_model.decode(next_latent)
+                        next_observation = (th.zeros_like(observations[:,0])
+                            if getattr(self.policy,'latent_actor',False)
+                            else self.world_model.decode(next_latent))
                         if cache_policy_observations:
+                            critic_latent_history = th.cat((critic_latent_history,
+                                next_latent[:,None]),dim=1)[:, -self.policy.stack_obs:]
+                            critic_history_valid = th.cat((critic_history_valid,
+                                th.ones_like(critic_history_valid[:,:1])),dim=1)[:, -self.policy.stack_obs:]
                             # Reference feeds generated token decodes directly
                             # to the actor, without quantizing them a second time.
                             reconstructed_next = next_observation[:, None]
@@ -1038,7 +1072,8 @@ class MATWMLearner:
         with th.no_grad():
             if cache_policy_observations:
                 final_state = self.policy.build_state_from_reconstructed(
-                    reconstructed_observations
+                    reconstructed_observations,
+                    latent=critic_latent_history, latent_valid=critic_history_valid
                 )
             else:
                 final_state = self.policy.build_state(
@@ -1147,17 +1182,61 @@ class MATWMLearner:
                 else getattr(self.args, "marie_value_coef", 0.5)
             )
             epochs = getattr(self.args, "marie_ppo_epochs", 5)
+            units_per_minibatch = int(getattr(
+                self.args, "marie_ppo_minibatch_teams", 2000
+            ))
+            if original_marie and units_per_minibatch < 1:
+                raise ValueError('MARIE PPO minibatch must contain at least one team')
             actor_losses, critic_losses, grad_norms = [], [], []
+            imagined_critic_losses, real_critic_losses = [], []
+            real_examples = getattr(
+                self, "_marie_real_critic_examples", None
+            )
+            real_weight = float(getattr(
+                self.args, "marie_real_critic_weight", 0.0
+            )) if real_examples is not None else 0.0
+
+            def mixed_critic_loss(imagined_loss, requested_teams):
+                if not real_weight:
+                    return imagined_loss
+                real_states, real_targets = real_examples[:2]
+                take = min(requested_teams, real_states.shape[0])
+                # The replay draw already randomizes teams. Avoid consuming the
+                # PPO RNG here so enabling critic supervision cannot change the
+                # actor's minibatch order or sampled actions.
+                chosen = th.arange(take, device=real_states.device)
+                selected_states = real_states[chosen].reshape(
+                    take * self.n_agents, -1
+                )
+                selected_targets = real_targets[chosen].reshape(-1)
+                selected_focal = th.arange(
+                    self.n_agents, device=selected_states.device
+                ).repeat(take)
+                predicted = self.policy.values(
+                    selected_states, selected_focal
+                ).reshape(-1)
+                errors=0.5*(predicted-selected_targets).pow(2)
+                if len(real_examples)==3:
+                    mask=real_examples[2][chosen].reshape(-1).to(errors.dtype)
+                    real_loss=(errors*mask).sum()/mask.sum().clamp_min(1)
+                else:real_loss=errors.mean()
+                real_critic_losses.append(real_loss.detach())
+                imagined_critic_losses.append(imagined_loss.detach())
+                return (1.0 - real_weight) * imagined_loss + real_weight * real_loss
+
+            diagnostic_sums = None
+            if getattr(self.args, 'marie_log_policy_diagnostics', False):
+                from learners.marie.diagnostics import ppo_diagnostics, summarize_ppo
+                diagnostic_sums = flat_returns.new_zeros(6)
             for _ in range(epochs):
                 if original_marie:
-                    # Upstream shuffles team-time samples and processes 2,000
-                    # complete teams per minibatch. Keep each team intact so
+                    # Upstream defaults to 2,000 team-time samples per
+                    # minibatch. Keep each team intact so
                     # AugmentedCritic attention sees the same tensor layout.
                     unit_count = flat_states.shape[0] // self.n_agents
                     unit_order = th.randperm(
                         unit_count, device=flat_states.device
                     )
-                    units_per_minibatch = 2000
                     minibatches = [
                         (unit_order[start:start + units_per_minibatch, None]
                          * self.n_agents
@@ -1203,6 +1282,12 @@ class MATWMLearner:
                         denominator = loss_mask.sum().clamp_min(1.0)
                         actor_loss = -(actor_terms * loss_mask).sum() / denominator
                         critic_loss = (critic_terms * loss_mask).sum() / denominator
+                    if diagnostic_sums is not None:
+                        diagnostic_sums += ppo_diagnostics(
+                            distribution, new_log_prob - flat_old_log_probs[idx],
+                            new_values, flat_returns[idx], clip,
+                            None if flat_controlled is None else flat_controlled[idx],
+                        )
                     if self.separate_ppo_optimisers:
                         self.actor_optimiser.zero_grad()
                         actor_loss.backward()
@@ -1214,7 +1299,10 @@ class MATWMLearner:
                         )
                         self.actor_optimiser.step()
                         self.critic_optimiser.zero_grad()
-                        (value_coefficient * critic_loss).backward()
+                        combined_critic_loss = mixed_critic_loss(
+                            critic_loss, max(1, idx.numel() // self.n_agents)
+                        )
+                        (value_coefficient * combined_critic_loss).backward()
                         critic_grad_norm = th.nn.utils.clip_grad_norm_(
                             self.policy.critic_parameters(),
                             getattr(
@@ -1227,9 +1315,12 @@ class MATWMLearner:
                             th.as_tensor(critic_grad_norm),
                         )
                     else:
+                        combined_critic_loss = mixed_critic_loss(
+                            critic_loss, max(1, idx.numel() // self.n_agents)
+                        )
                         self.agent_optimiser.zero_grad()
                         (
-                            actor_loss + value_coefficient * critic_loss
+                            actor_loss + value_coefficient * combined_critic_loss
                         ).backward()
                         grad_norm = th.nn.utils.clip_grad_norm_(
                             list(self.policy.actor_parameters())
@@ -1240,12 +1331,17 @@ class MATWMLearner:
                         )
                         self.agent_optimiser.step()
                     actor_losses.append(actor_loss.detach())
-                    critic_losses.append(critic_loss.detach())
+                    critic_losses.append(combined_critic_loss.detach())
                     grad_norms.append(grad_norm.detach())
             self.policy.update_ema(getattr(self.args, "matwm_ema_decay", 0.98))
-            return {
+            stats = {
                 "matwm_actor_loss": th.stack(actor_losses).mean().item(),
                 "matwm_critic_loss": th.stack(critic_losses).mean().item(),
+                "marie_ppo_updates": float(len(actor_losses)),
+                "marie_imagined_transitions_per_agent": float(horizon),
+                "marie_imagined_team_transitions": float(
+                    states.shape[0] * horizon / self.n_agents
+                ),
                 "matwm_real_critic_loss": 0.0,
                 "matwm_return_mean": returns.mean().item(),
                 "matwm_critic_return_mean": returns.mean().item(),
@@ -1259,6 +1355,23 @@ class MATWMLearner:
                     else controlled.float().mean().item()
                 ),
             }
+            if real_critic_losses:
+                stats.update(
+                    matwm_imagined_critic_loss=th.stack(
+                        imagined_critic_losses
+                    ).mean().item(),
+                    matwm_real_critic_loss=th.stack(
+                        real_critic_losses
+                    ).mean().item(),
+                    marie_real_critic_weight=real_weight,
+                    marie_real_critic_teams=float(real_examples[0].shape[0]),
+                )
+            if diagnostic_sums is not None:
+                stats.update(summarize_ppo(diagnostic_sums))
+            if initial_memory is not None:
+                stats['marie_recurrent_initial_state_norm'] = initial_memory.norm(dim=-1).mean().item()
+                stats['marie_recurrent_warmup_steps'] = memory_valid.float().sum(-1).mean().item()
+            return stats
         actor_loss = -self._masked_mean(
             advantage * log_probs + entropy_coefficient * entropies, weights
         )
@@ -1314,13 +1427,15 @@ class MATWMLearner:
         self.world_optimiser.load_state_dict(
             th.load(os.path.join(path, "world_opt.th"), map_location="cpu")
         )
-        self.agent_optimiser.load_state_dict(
+        if not (getattr(self.args, 'marie_reset_critic_on_load', False)
+                or getattr(self.args,'marie_reset_actor_on_load',False)):
+            self.agent_optimiser.load_state_dict(
             th.load(os.path.join(path, "agent_opt.th"), map_location="cpu")
         )
         if self.separate_ppo_optimisers:
             actor_path = os.path.join(path, "actor_opt.th")
             critic_path = os.path.join(path, "critic_opt.th")
-            if os.path.exists(actor_path):
+            if os.path.exists(actor_path) and not getattr(self.args,'marie_reset_actor_on_load',False):
                 self.actor_optimiser.load_state_dict(th.load(actor_path, map_location="cpu"))
-            if os.path.exists(critic_path):
+            if os.path.exists(critic_path) and not getattr(self.args, 'marie_reset_critic_on_load', False):
                 self.critic_optimiser.load_state_dict(th.load(critic_path, map_location="cpu"))

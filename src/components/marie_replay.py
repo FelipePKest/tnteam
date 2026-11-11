@@ -49,7 +49,8 @@ class MARIEReplayBuffer:
                 value.copy_(batch[key][b:b+1, :length+1])
             for key, value in episode.data.episode_data.items():
                 value.copy_(batch.data.episode_data[key][b:b+1])
-            episode['terminated'][0, length-1] = 1
+            end_key = 'episode_end' if 'episode_end' in self.scheme else 'terminated'
+            episode[end_key][0, length-1] = 1
             if (self.max_policy_steps is None and
                     self._process.memory_info().rss > self.policy_memory_limit_bytes):
                 self.max_policy_steps = max(self.policy_steps, length)
@@ -153,4 +154,52 @@ class MARIEReplayBuffer:
         if controlled_only:
             from components.marie_context import compact_controlled
             result = compact_controlled(result)
+        return result
+
+    def sample_real_critic(self, count, stack, horizon, controlled_count=None,
+                           recent_steps=50000, rng=None):
+        """Separate real futures, including terminal rewards and observations.
+
+        Keep imagination seed sampling unchanged. Current observations occupy
+        slot stack-1; histories are left padded and short futures right padded.
+        The explicit future lengths distinguish padding from time-limit tails.
+        """
+        if min(count, stack, horizon) < 1 or recent_steps < 0:
+            raise ValueError('Real critic sample sizes must be positive')
+        rng = np.random.default_rng() if rng is None else rng
+        episodes = []
+        steps = 0
+        for episode in reversed(self.episodes):
+            episodes.append(episode)
+            steps += episode.max_seq_length - 1
+            if recent_steps and steps >= recent_steps:
+                break
+        if controlled_count is not None:
+            episodes = [e for e in episodes if
+                        int(e['trainable_agents'][0, 0].sum()) == controlled_count]
+        if not episodes:
+            raise ValueError('No eligible real critic episodes')
+        result = self._batch(count, stack + horizon)
+        future_steps = []
+        for row, idx in enumerate(rng.integers(len(episodes), size=count)):
+            episode = episodes[idx]
+            transitions = episode.max_seq_length - 1
+            current = int(rng.integers(transitions))
+            future = min(horizon, transitions-current)
+            left = max(0, current-stack+1)
+            offset = stack-1-(current-left)
+            stop = current+future+1
+            target = slice(offset, offset+stop-left)
+            for key, value in result.data.transition_data.items():
+                value[row, target] = episode[key][0, left:stop]
+            for key, value in result.data.episode_data.items():
+                value[row] = episode.data.episode_data[key][0]
+            # Compaction selects slots from the last record, which can be pad.
+            if 'trainable_agents' in result.scheme:
+                result['trainable_agents'][row] = episode['trainable_agents'][0, 0]
+            future_steps.append(future)
+        if controlled_count is not None:
+            from components.marie_context import compact_controlled
+            result = compact_controlled(result)
+        result.marie_real_critic_steps = th.tensor(future_steps, device=result.device)
         return result

@@ -49,3 +49,20 @@ class OriginalMARIECritic(nn.Module):
 
     def independent(self, features):
         return self.value(F.relu(self.embed(features)))
+
+
+class LatentMARIECritic(nn.Module):
+    """Value discrete latent histories directly; -1 denotes padded frames."""
+    def __init__(self, history_tokens, categories, hidden_dim, heads, embedding_dim=32):
+        super().__init__()
+        self.token_embedding = nn.Embedding(categories + 1, embedding_dim, padding_idx=0)
+        self.network = OriginalMARIECritic(history_tokens * embedding_dim, hidden_dim, heads)
+
+    def features(self, codes):
+        return self.token_embedding(codes.long() + 1).flatten(-2)
+
+    def forward(self, codes):
+        return self.network(self.features(codes))
+
+    def independent(self, codes):
+        return self.network.independent(self.features(codes))

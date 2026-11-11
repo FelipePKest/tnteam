@@ -3,6 +3,18 @@ name: "marie"
 learner: "marie_learner"
 mac: "marie_mac"
 on_policy: False
+# MPE positions and relative distances can exceed the SMAC observation bounds.
+marie_clip_policy_observations: False
+# MPE's external time limit resets replay context but is not an MDP terminal.
+marie_bootstrap_time_limits: True
+marie_safe_rollout_cache: True
+# Opt-in GRU memory over controlled transition blocks, trained with model losses.
+marie_recurrent_world_model: False
+# Optional normalized mixture with supervision initialized like imagination.
+# 0 preserves canonical training; 1 gives equal canonical/short-context weight.
+marie_short_context_loss_weight: 0.0
+marie_log_policy_diagnostics: True
+marie_validation_horizons: [1, 5, 14, 15]
 
 batch_size: 30
 buffer_size: 512
@@ -44,13 +56,13 @@ marie_tokenizer_grad_clip: 10.0
 marie_tokenizer_entropy_coef: 0.001
 marie_vq_ema_decay: 0.8
 marie_vq_commitment_weight: 10.0
-# Upstream runs 200 tokenizer and WM steps per update event, starts the world
-# model after 10 events, then starts five actor/critic rounds after 20.
+# Retain model fitting; reduce policy reuse of imperfect imagined trajectories.
 marie_tokenizer_epochs: 200
 marie_world_epochs: 200
-marie_policy_epochs: 5
+marie_policy_epochs: 1
 marie_imagined_ppo: True
 marie_ppo_epochs: 5
+marie_ppo_minibatch_teams: 2000
 marie_ppo_clip: 0.2
 marie_value_coef: 1.0
 marie_world_warmup_events: 9
@@ -92,7 +104,8 @@ matwm_free_bits: 1.0
 # Four previous observations plus the current one form the five-frame policy
 # stack used by upstream rollout_policy_trans.
 matwm_context_length: 5
-matwm_imagination_horizon: 15
+# Reference MARIE uses H-1 transitions plus a final bootstrap value.
+matwm_imagination_horizon: 6
 matwm_agent_batch_size: 600
 matwm_lambda: 0.95
 matwm_entropy_coef: 0.001
@@ -159,5 +172,11 @@ marie_skip_unused_dynamics: True
 
 # Only controlled-agent streams enter sampled training and validation contexts.
 marie_controlled_replay_only: False
+
+# Optional critic calibration from observed trajectories. Actor updates remain
+# entirely imagined. 0 preserves canonical MARIE exactly; 0.1 mixes 90% of the
+# imagined critic loss with 10% five-step observed-reward supervision.
+marie_real_critic_weight: 0.0
+marie_real_critic_horizon: 5
 # Graceful training deadline; reserve remaining wall time for final saving/evaluation.
 training_wall_time_seconds: 0

@@ -19,7 +19,7 @@ def compact_controlled(batch):
     indices = selected.nonzero()[:, 1].reshape(batch.batch_size, count)
     # Drop global state, foreign policy identities and all unrelated metadata.
     fields = {'obs', 'actions', 'actions_onehot', 'avail_actions',
-              'trainable_agents', 'reward', 'terminated'}
+              'trainable_agents', 'reward', 'terminated', 'episode_end'}
     scheme = {k: v for k, v in batch.scheme.items() if k in fields}
     groups = dict(batch.groups, agents=count)
     result = EpisodeBatch(scheme, groups, batch.batch_size, batch.max_seq_length,

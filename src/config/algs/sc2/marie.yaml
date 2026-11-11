@@ -1,8 +1,32 @@
 # MARIE: Multi-Agent auto-Regressive Imagination for Efficient learning
 name: "marie"
+marie_fixed_team_embedding: False
+marie_full_team_world_model: False
+marie_latent_critic: False
+marie_latent_actor: False
+marie_reset_actor_on_load: False
+marie_reset_critic_on_load: False
+marie_value_alignment_weight: 0.0
+marie_value_alignment_draws: 4
+marie_value_alignment_teams: 4
+marie_value_alignment_interval: 20
+marie_value_alignment_grad_ratio: 0.1
+marie_log_policy_diagnostics: False
+marie_real_critic_weight: 0.0
+marie_real_critic_horizon: 5
+marie_real_critic_recent_steps: 50000
+marie_terminal_inclusive_replay: False
+marie_short_context_loss_weight: 0.0
+marie_stratified_evaluation: False
+marie_evaluation_seed: 984321
+resume_t_env_from_checkpoint: False
+load_step: last
+marie_recurrent_world_model: False
 learner: "marie_learner"
 mac: "marie_mac"
 on_policy: False
+# Preserve the reference MARIE preprocessing for SMAC observations.
+marie_clip_policy_observations: True
 
 batch_size: 30
 buffer_size: 512
@@ -53,6 +77,7 @@ marie_world_epochs: 200
 marie_policy_epochs: 5
 marie_imagined_ppo: True
 marie_ppo_epochs: 5
+marie_ppo_minibatch_teams: 2000
 marie_ppo_clip: 0.2
 marie_value_coef: 1.0
 marie_world_warmup_events: 9

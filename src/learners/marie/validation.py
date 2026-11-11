@@ -5,6 +5,7 @@ from components.episode_buffer import EpisodeBatch
 from components.marie_context import compact_controlled, controlled_group
 from modules.world_models.marie.convergence import ModelConvergence, ValidationPlateau
 from modules.world_models.marie.validation import collect_validation
+from learners.marie.diagnostics import real_policy_samples, summarize_real_policy
 
 
 class MARIEValidation:
@@ -75,13 +76,21 @@ class MARIEValidation:
         by policy imagination. Report each horizon separately; no universal
         sufficiency threshold is assumed. Preserve training RNG and modes.
         """
-        modes = [(module, module.training) for module in self.world_model.modules()]
-        records = {h: [] for h in (1, 5, 15)}
+        modes = [(module, module.training) for module in self.policy.modules()]
+        horizons = set(getattr(self.args, 'marie_validation_horizons', (1, 5, 15)))
+        policy_horizon = self.imagination_horizon - int(
+            getattr(self.args, 'marie_original_procedure', False)
+        )
+        horizons.add(max(1, policy_horizon))
+        horizons = sorted(horizons)
+        records = {h: [] for h in horizons}
         reconstruction_errors = []
+        policy_samples = {}
+        log_policy = getattr(self.args, 'marie_log_policy_diagnostics', False)
         device = next(self.world_model.parameters()).device
         devices = [device.index or 0] if device.type == "cuda" else []
         try:
-            self.world_model.eval()
+            self.policy.eval()
             with th.random.fork_rng(devices=devices):
                 th.manual_seed(1729)
                 validation_size = int(getattr(self.args, "marie_validation_batch_size", 32))
@@ -95,19 +104,33 @@ class MARIEValidation:
                     for count, grouped in sorted(groups.items()):
                         with controlled_group(self, count):
                             measured, errors = collect_validation(
-                                self.world_model, grouped, count, validation_size)
+                                self.world_model, grouped, count, validation_size, horizons)
+                            if log_policy:
+                                policy_samples[count] = real_policy_samples(
+                                    self.policy, grouped, self.args.gamma)
                         for horizon in records:
                             records[horizon].extend(measured[horizon])
                         reconstruction_errors.extend(errors)
                 else:
                     records, reconstruction_errors = collect_validation(
-                        self.world_model, batches, self.n_agents, validation_size)
+                        self.world_model, batches, self.n_agents, validation_size, horizons)
+                    if log_policy:
+                        policy_samples[self.n_agents] = real_policy_samples(
+                            self.policy, batches, self.args.gamma)
 
         finally:
             for module, training in modes:
                 module.training = training
-        result = {}
+        result = {prefix + '/policy_horizon': policy_horizon}
         base_prefix = prefix
+        if policy_samples:
+            all_samples = [row for rows in policy_samples.values() for row in rows]
+            for label, rows in [('policy', all_samples)] + [
+                ('policy/agents_%d' % count, rows)
+                for count, rows in sorted(policy_samples.items())
+            ]:
+                for key, value in summarize_real_policy(rows).items():
+                    result[base_prefix + '/' + label + '/' + key] = value
         if reconstruction_errors:
             result[base_prefix+"/tokenizer_reconstruction_mae"] = sum(reconstruction_errors)/len(reconstruction_errors)
         for horizon, rows in records.items():

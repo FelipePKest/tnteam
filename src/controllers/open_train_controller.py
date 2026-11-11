@@ -140,12 +140,16 @@ class OpenTrainMAC:
         Randomly samples n_uncontrolled agents from the uncontrolled agent team.
         ''' 
         # sample number of uncontrolled agents
-        if self.n_uncontrolled is None: # sample n_uncontrolled uniformly from 1 to n_agents-1
+        evaluation_team = getattr(self, 'evaluation_team', None)
+        if evaluation_team is not None:
+            active_uncontrolled_team, n_uncontrolled = evaluation_team
+        elif self.n_uncontrolled is None: # sample n_uncontrolled uniformly from 1 to n_agents-1
             n_uncontrolled = np.random.randint(1, self.n_agents)
         else:
             n_uncontrolled = self.n_uncontrolled
         # sample uncontrolled agent team
-        active_uncontrolled_team = np.random.choice(list(self.uncontrolled_agent_teams.keys()))
+        if evaluation_team is None:
+            active_uncontrolled_team = np.random.choice(list(self.uncontrolled_agent_teams.keys()))
         self.active_uncontrolled_team = active_uncontrolled_team
         if self.uncontrolled_team_name_to_idx is not None:
             self.active_uncontrolled_team_idx = self.uncontrolled_team_name_to_idx[active_uncontrolled_team]
